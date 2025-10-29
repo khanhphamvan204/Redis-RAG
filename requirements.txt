@@ -3,6 +3,7 @@ fastapi
 uvicorn
 python-dotenv
 pymongo
+motor
 python-multipart
 PyJWT
 
@@ -40,3 +41,6 @@ torch==2.2.0+cpu
 
 bcrypt==3.2.2
 pydantic[email]
+
+redis
+redisvl

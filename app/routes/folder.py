@@ -9,12 +9,16 @@ from typing import List, Optional, Any, Dict
 from pymongo.errors import PyMongoError, DuplicateKeyError
 import jwt
 import bcrypt
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # Import từ module services
 from app.services.auth_service import verify_token_v2 
 
 # --- 1. Cấu hình ---
-MONGO_DATABASE_URL = "mongodb://localhost:27017"
+MONGO_DATABASE_URL = os.getenv("DATABASE_URL", "mongodb://localhost:27017")
 AGENT_DB_NAME = "faiss_db"
 FOLDER_COLLECTION = "folders"
 USERS_COLLECTION = "users"

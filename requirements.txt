@@ -1,0 +1,42 @@
+# Web & Database
+fastapi
+uvicorn
+python-dotenv
+pymongo
+python-multipart
+PyJWT
+
+# Data Handling & Document Processing
+pdfplumber
+pandas
+PyMuPDF
+Pillow
+faiss-cpu
+pdf2image
+opencv-python
+pytesseract
+python-docx
+openpyxl
+unstructured[xlsx]
+
+# LangChain (Pinned to 0.x generation)
+# Chốt phiên bản core về 0.3.79 để giữ tương thích với code cũ
+langchain-core==0.3.79
+langchain
+langchain-community
+langchain-google-genai
+langchain_experimental
+langchain-huggingface
+
+# Embeddings
+sentence-transformers
+
+# Version Fixes
+numpy<2
+
+# torch CPU (link -f phải đi trước torch)
+-f https://download.pytorch.org/whl/torch_stable.html
+torch==2.2.0+cpu
+
+bcrypt==3.2.2
+pydantic[email]

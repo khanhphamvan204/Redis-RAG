@@ -311,8 +311,11 @@ def add_to_embedding(file_path: str, metadata, use_semantic_chunking: bool = Tru
                     doc_key = f"doc:{metadata.file_type}:{metadata.id}:{i}"
                     
                     # Convert role lists to comma-separated strings for tag fields
-                    role_user_str = ",".join(chunk.metadata.get('role', {}).get('user', []))
-                    role_subject_str = ",".join(chunk.metadata.get('role', {}).get('subject', []))
+                    # Convert all items to string to handle both str and int types
+                    role_user_list = chunk.metadata.get('role', {}).get('user', [])
+                    role_subject_list = chunk.metadata.get('role', {}).get('subject', [])
+                    role_user_str = ",".join(str(item) for item in role_user_list)
+                    role_subject_str = ",".join(str(item) for item in role_subject_list)
                     
                     data = {
                         "content": chunk.page_content,
@@ -401,8 +404,11 @@ def update_metadata_only(doc_id: str, new_metadata) -> bool:
             return False
         
         updated_count = 0
-        role_user_str = ",".join(new_metadata.role.get('user', []))
-        role_subject_str = ",".join(new_metadata.role.get('subject', []))
+        # Convert all items to string to handle both str and int types
+        role_user_list = new_metadata.role.get('user', [])
+        role_subject_list = new_metadata.role.get('subject', [])
+        role_user_str = ",".join(str(item) for item in role_user_list)
+        role_subject_str = ",".join(str(item) for item in role_subject_list)
         
         for key in keys:
             try:

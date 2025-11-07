@@ -20,6 +20,10 @@ import shutil
 import logging
 import time
 import numpy as np
+from redisvl.extensions.session_manager import SemanticSessionManager
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.schema import HumanMessage, AIMessage
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -653,3 +657,383 @@ Hãy trả lời câu hỏi dựa trên tài liệu trên.
     except Exception as e:
         logger.error(f"Lỗi: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ")
+    
+
+class ConversationRequest(BaseModel):
+    query: str = Field(..., description="Câu hỏi của người dùng")
+    k: int = Field(default=5, ge=1, le=100, description="Số lượng kết quả tìm kiếm")
+    file_type: str = Field(..., description="Loại tài liệu (public, student, teacher, admin)")
+    similarity_threshold: float = Field(default=0.0, ge=0.0, le=1.0, description="Ngưỡng độ tương đồng")
+    session_id: str = Field(default=None, description="ID phiên làm việc (tự động tạo nếu không có)")
+    max_history_messages: int = Field(default=5, ge=1, le=20, description="Số lượng tin nhắn lịch sử tối đa")
+    use_query_rewriting: bool = Field(default=True, description="Sử dụng query rewriting với history")
+
+
+# Khởi tạo Session Manager (đặt ở đầu file hoặc trong config)
+def get_session_manager():
+    """Khởi tạo Semantic Session Manager với Redis"""
+    client = get_redis_client()
+    
+    session_manager = SemanticSessionManager(
+        name="chat_sessions",
+        redis_client=client,
+        distance_threshold=0.3,  # Ngưỡng để lọc context liên quan
+    )
+    
+    return session_manager
+
+
+async def rewrite_query_with_history(
+    original_query: str, 
+    history: list, 
+    llm: ChatGoogleGenerativeAI
+) -> str:
+    """
+    Viết lại câu hỏi dựa trên lịch sử hội thoại
+    Làm rõ các đại từ và tham chiếu mơ hồ
+    """
+    if not history:
+        return original_query
+    
+    try:
+        # Tạo prompt cho query rewriting
+        rewrite_prompt = ChatPromptTemplate.from_messages([
+            ("system", """🎯 Nhiệm vụ: Viết lại câu hỏi của user để làm rõ nghĩa dựa trên lịch sử hội thoại.
+
+📋 Quy tắc:
+1. Thay thế đại từ (nó, đó, này, họ...) bằng danh từ cụ thể từ lịch sử
+2. Bổ sung ngữ cảnh nếu câu hỏi quá ngắn gọn
+3. Giữ nguyên ý định câu hỏi gốc
+4. Nếu câu hỏi đã rõ ràng, giữ nguyên
+5. CHỈ TRẢ VỀ CÂU HỎI ĐÃ VIẾT LẠI, KHÔNG GHI CHÚ THÊM
+
+Ví dụ:
+- Lịch sử: "Redis là gì?" → "Redis là cơ sở dữ liệu in-memory"
+- Câu hỏi: "Cho tôi ví dụ về nó" 
+- Viết lại: "Cho tôi ví dụ về Redis"
+
+- Lịch sử: "Python có những framework web nào?" → "Flask, Django, FastAPI"
+- Câu hỏi: "So sánh 2 cái đầu"
+- Viết lại: "So sánh Flask và Django"
+"""),
+            MessagesPlaceholder(variable_name="history"),
+            ("user", "Câu hỏi cần viết lại: {query}")
+        ])
+        
+        # Format history
+        formatted_history = []
+        for msg in history[-6:]:  # Chỉ lấy 3 cặp hỏi-đáp gần nhất
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            if role == 'user':
+                formatted_history.append(HumanMessage(content=content))
+            else:
+                formatted_history.append(AIMessage(content=content))
+        
+        messages = rewrite_prompt.format_messages(
+            history=formatted_history,
+            query=original_query
+        )
+        
+        result = llm.invoke(messages)
+        rewritten_query = result.content.strip()
+        
+        logger.info(f"Query rewriting: '{original_query}' → '{rewritten_query}'")
+        return rewritten_query
+        
+    except Exception as e:
+        logger.error(f"Query rewriting failed: {str(e)}")
+        return original_query
+
+
+@router.post("/search-with-llm-v2")
+async def search_with_llm_history(
+    request: ConversationRequest,
+    current_user: dict = Depends(verify_token_v2)
+):
+    """
+    Tìm kiếm với LLM có hỗ trợ lịch sử hội thoại
+    - Viết lại câu hỏi dựa trên lịch sử (nếu bật use_query_rewriting)
+    - Tìm kiếm với câu hỏi đã được làm rõ
+    - Lưu trữ lịch sử chat trong Redis
+    - Hỗ trợ nhiều session đồng thời
+    """
+    start_time = time.time()
+    
+    try:
+        # Tạo hoặc sử dụng session_id
+        session_id = request.session_id or f"user_{current_user.get('id', 'anonymous')}_{int(time.time())}"
+        
+        # Khởi tạo Session Manager và LLM
+        session_manager = get_session_manager()
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0.7
+        )
+        
+        # === BƯỚC 1: Lấy lịch sử hội thoại CÓ LIÊN QUAN ===
+        relevant_history = []
+        formatted_history = []
+        rewritten_query = request.query
+        
+        try:
+            # Lấy lịch sử semantic - tự động lọc context liên quan
+            relevant_history = session_manager.get_relevant(
+                session_id=session_id,
+                prompt=request.query,
+                top_k=request.max_history_messages
+            )
+            
+            # Format lịch sử
+            for msg in relevant_history:
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                if role == 'user':
+                    formatted_history.append(HumanMessage(content=content))
+                else:
+                    formatted_history.append(AIMessage(content=content))
+            
+            # === BƯỚC 2: Viết lại câu hỏi dựa trên lịch sử ===
+            if request.use_query_rewriting and relevant_history:
+                rewritten_query = await rewrite_query_with_history(
+                    original_query=request.query,
+                    history=relevant_history,
+                    llm=llm
+                )
+                
+        except Exception as e:
+            logger.warning(f"Failed to retrieve/process history: {str(e)}")
+        
+        # === BƯỚC 3: Tìm kiếm vector documents với câu hỏi ĐÃ VIẾT LẠI ===
+        index_name = get_index_name(request.file_type)
+        client = get_redis_client()
+        
+        try:
+            index = SearchIndex.from_existing(index_name, redis_client=client)
+        except Exception as e:
+            logger.warning(f"No index found for {request.file_type}: {str(e)}")
+            
+            # Lưu câu hỏi vào history ngay cả khi không có index
+            session_manager.add_message(
+                session_id=session_id,
+                message=request.query,
+                role="user"
+            )
+            session_manager.add_message(
+                session_id=session_id,
+                message="Không tìm thấy tài liệu với thông tin được cung cấp.",
+                role="assistant"
+            )
+            
+            return {
+                "session_id": session_id,
+                "original_query": request.query,
+                "rewritten_query": rewritten_query,
+                "llm_response": "Không tìm thấy tài liệu với thông tin được cung cấp.",
+                "contexts": [],
+                "conversation_history": [],
+                "query_rewriting_used": request.use_query_rewriting,
+                "search_time_ms": round((time.time() - start_time) * 1000, 2)
+            }
+        
+        # Generate query embedding với CÂU HỎI ĐÃ VIẾT LẠI
+        try:
+            embedding_model = get_embedding_model()
+            query_embedding = embedding_model.embed_query(rewritten_query)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Không thể tạo embedding: {str(e)}")
+        
+        # Perform vector search
+        try:
+            vector_query = VectorQuery(
+                vector=query_embedding,
+                vector_field_name="embedding",
+                return_fields=["content", "doc_id", "filename", "file_type", "uploaded_by", 
+                              "role_user", "role_subject", "created_at", "url"],
+                num_results=request.k * 2
+            )
+            
+            results = index.query(vector_query)
+            
+            # Process results
+            search_results = []
+            for result in results:
+                distance = float(result.get('vector_distance', 2.0))
+                similarity = standardization(distance)
+                
+                if similarity < request.similarity_threshold:
+                    continue
+                
+                role_user = result.get('role_user', '').split(',') if result.get('role_user') else []
+                role_subject = result.get('role_subject', '').split(',') if result.get('role_subject') else []
+                
+                metadata = {
+                    '_id': result.get('doc_id', ''),
+                    'filename': result.get('filename', ''),
+                    'file_type': result.get('file_type', ''),
+                    'uploaded_by': result.get('uploaded_by', ''),
+                    'role': {
+                        'user': [u for u in role_user if u],
+                        'subject': [s for s in role_subject if s]
+                    },
+                    'createdAt': result.get('created_at', ''),
+                    'url': result.get('url', ''),
+                    'similarity_score': float(similarity)
+                }
+                
+                search_results.append({
+                    "content": result.get('content', ''),
+                    "metadata": metadata
+                })
+            
+            top_results = search_results[:request.k]
+            
+        except Exception as e:
+            logger.error(f"Search failed: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Tìm kiếm thất bại: {str(e)}")
+        
+        # === BƯỚC 4: Tạo phản hồi từ LLM với context và history ===
+        llm_response = "Không tìm thấy tài liệu với thông tin được cung cấp."
+        
+        if top_results:
+            try:
+                # Tạo context từ documents
+                document_context = "\n\n".join([
+                    f"📄 Tài liệu {i+1} (Độ tương đồng: {result['metadata']['similarity_score']:.2%}):\n"
+                    f"Tên file: {result['metadata']['filename']}\n"
+                    f"Nội dung: {result['content'][:500]}..."  # Giới hạn độ dài
+                    for i, result in enumerate(top_results)
+                ])
+                
+                # Tạo prompt với history
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", """🎯 Vai trò: Bạn là trợ lý AI chuyên nghiệp, trả lời dựa trên tài liệu và ngữ cảnh hội thoại.
+
+📋 Nguyên tắc:
+- Ưu tiên thông tin từ tài liệu được cung cấp
+- Tham khảo lịch sử hội thoại để hiểu ngữ cảnh
+- Nếu câu hỏi liên quan đến câu hỏi trước, kết nối thông tin
+- Nếu không có thông tin: "Xin lỗi, tôi không tìm thấy thông tin liên quan."
+
+💡 Format trả lời:
+- Dùng **bold** cho từ khóa quan trọng
+- Dùng danh sách đánh số hoặc gạch đầu dòng
+- Trích dẫn tên file khi cần thiết
+
+📂 Tài liệu tham khảo:
+{document_context}"""),
+                    MessagesPlaceholder(variable_name="history"),
+                    ("user", "{query}")
+                ])
+                
+                # Tạo chain với history - Dùng CÂU HỎI GỐC để LLM hiểu đúng ý định
+                messages = prompt.format_messages(
+                    document_context=document_context,
+                    history=formatted_history,
+                    query=request.query  # Dùng câu hỏi gốc, không phải rewritten
+                )
+                
+                result = llm.invoke(messages)
+                llm_response = result.content
+                
+            except Exception as e:
+                logger.error(f"LLM generation failed: {str(e)}")
+                llm_response = "Không thể tạo phản hồi từ LLM."
+        
+        # === BƯỚC 5: Lưu vào session history ===
+        try:
+            # Lưu câu hỏi GỐC (không phải rewritten)
+            session_manager.add_message(
+                session_id=session_id,
+                message=request.query,
+                role="user"
+            )
+            
+            # Lưu câu trả lời
+            session_manager.add_message(
+                session_id=session_id,
+                message=llm_response,
+                role="assistant"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to save to history: {str(e)}")
+        
+        # === BƯỚC 6: Chuẩn bị response ===
+        search_time_ms = round((time.time() - start_time) * 1000, 2)
+        
+        return {
+            "session_id": session_id,
+            "original_query": request.query,
+            "rewritten_query": rewritten_query if request.use_query_rewriting else None,
+            "query_rewriting_used": request.use_query_rewriting and (rewritten_query != request.query),
+            "llm_response": llm_response,
+            "contexts": top_results,
+            "conversation_history": [
+                {
+                    "role": msg.get('role', 'user'),
+                    "content": msg.get('content', ''),
+                    "timestamp": msg.get('timestamp', '')
+                }
+                for msg in relevant_history
+            ],
+            "total_contexts": len(top_results),
+            "history_used": len(relevant_history),
+            "search_time_ms": search_time_ms
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ")
+
+
+@router.delete("/conversation/{session_id}")
+async def clear_conversation_history(
+    session_id: str,
+    current_user: dict = Depends(verify_token_v2)
+):
+    """Xóa lịch sử hội thoại của một session"""
+    try:
+        session_manager = get_session_manager()
+        session_manager.delete(session_id)
+        
+        return {
+            "message": "Đã xóa lịch sử hội thoại thành công",
+            "session_id": session_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi xóa lịch sử: {str(e)}")
+
+
+@router.get("/conversation/{session_id}/history")
+async def get_conversation_history(
+    session_id: str,
+    limit: int = 20,
+    current_user: dict = Depends(verify_token_v2)
+):
+    """Lấy toàn bộ lịch sử hội thoại của một session"""
+    try:
+        session_manager = get_session_manager()
+        
+        # Lấy tất cả messages
+        messages = session_manager.get_recent(
+            session_id=session_id,
+            top_k=limit
+        )
+        
+        return {
+            "session_id": session_id,
+            "total_messages": len(messages),
+            "messages": [
+                {
+                    "role": msg.get('role', 'user'),
+                    "content": msg.get('content', ''),
+                    "timestamp": msg.get('timestamp', '')
+                }
+                for msg in messages
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi lấy lịch sử: {str(e)}")

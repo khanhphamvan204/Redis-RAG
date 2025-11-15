@@ -73,7 +73,8 @@ def create_access_token(user: dict):
         "username": user["username"],
         "user_type": user["user_type"],
         "full_name": user["full_name"],
-        "department": (user.get("department_info") or {}).get("department_name")
+        "user_id": user["user_id"],
+        "department_id": user.get("department_id")
     }
     return create_jwt_token(payload, expires_delta, token_type="access")
 

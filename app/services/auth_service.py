@@ -56,7 +56,7 @@ def verify_token_v2(credentials: HTTPAuthorizationCredentials = Depends(security
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         
         # Kiểm tra cấu trúc payload có đúng format mong muốn không
-        required_fields = ["username", "user_type", "full_name"]
+        required_fields = ["username", "user_type", "full_name", "user_id", "department_id"]
         missing_fields = [field for field in required_fields if field not in payload]
         
         if missing_fields:
@@ -66,8 +66,9 @@ def verify_token_v2(credentials: HTTPAuthorizationCredentials = Depends(security
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        # Kiểm tra các giá trị không được rỗng
-        empty_fields = [field for field in required_fields if not payload.get(field)]
+        # Kiểm tra các giá trị không được rỗng (trừ department_id có thể None)
+        empty_fields = [field for field in ["username", "user_type", "full_name", "user_id"] 
+                       if not payload.get(field)]
         if empty_fields:
             raise HTTPException(
                 status_code=401,
@@ -141,13 +142,22 @@ def verify_token_v2(credentials: HTTPAuthorizationCredentials = Depends(security
         )
 def check_file_access_permission(user_payload: Dict[str, Any], file_metadata: Dict[str, Any]) -> bool:
     """
-    Xác thực quyền truy cập cho JWT payload có cấu trúc mới
+    Xác thực quyền truy cập dựa trên user_id và department_id
     JWT payload format:
     {
         "username": "teacher001",
         "user_type": "Giáo viên", 
         "full_name": "TS. Lê Văn Cường",
-        "department": "CNTT"
+        "user_id": 101,
+        "department_id": 100
+    }
+    
+    File metadata format:
+    {
+        "role": {
+            "user": [101, 102],
+            "subject": [100, 200]
+        }
     }
     
     Args:
@@ -158,26 +168,26 @@ def check_file_access_permission(user_payload: Dict[str, Any], file_metadata: Di
         bool: True nếu có quyền truy cập, False nếu không
     """
     try:
-        # Lấy thông tin user từ token (cấu trúc mới)
-        user_id = str(user_payload.get("username", ""))
-        user_department = user_payload.get("department", "")
-        user_type = user_payload.get("user_type", "")
+        # Lấy thông tin user từ token
+        user_id = user_payload.get("user_id")
+        department_id = user_payload.get("department_id")
         full_name = user_payload.get("full_name", "")
-        
         
         # Kiểm tra xem file có metadata role không
         role_info = file_metadata.get("role", {})
         
         # Nếu role rỗng hoặc không tồn tại -> cho phép truy cập
         if not role_info:
+            logger.info(f"No role restrictions - Access GRANTED for user {user_id} ({full_name})")
             return True
         
-        # Lấy danh sách allowed users và subjects
+        # Lấy danh sách allowed users và subjects (departments)
         allowed_users = role_info.get("user", [])
         allowed_subjects = role_info.get("subject", [])
         
         # Nếu cả user và subject đều rỗng -> cho phép truy cập
         if not allowed_users and not allowed_subjects:
+            logger.info(f"Empty role lists - Access GRANTED for user {user_id} ({full_name})")
             return True
         
         # Kiểm tra logic phân quyền - CHỈ CẦN THỎA MÃN MỘT TRONG HAI
@@ -185,12 +195,12 @@ def check_file_access_permission(user_payload: Dict[str, Any], file_metadata: Di
         department_check_passed = False
         
         # Kiểm tra user_id nếu có danh sách allowed_users
-        if allowed_users:
-            user_check_passed = user_id in allowed_users
+        if allowed_users and user_id is not None:
+            user_check_passed = int(user_id) in [int(uid) for uid in allowed_users]
         
-        # Kiểm tra department nếu có danh sách allowed_subjects  
-        if allowed_subjects:
-            department_check_passed = user_department in allowed_subjects
+        # Kiểm tra department_id nếu có danh sách allowed_subjects  
+        if allowed_subjects and department_id is not None:
+            department_check_passed = int(department_id) in [int(sid) for sid in allowed_subjects]
         
         # Logic OR: Chỉ cần một trong hai điều kiện được thỏa mãn
         has_access = False
@@ -198,21 +208,21 @@ def check_file_access_permission(user_payload: Dict[str, Any], file_metadata: Di
         # Nếu có cấu hình user và user được phép -> cho phép truy cập
         if allowed_users and user_check_passed:
             has_access = True
+            logger.info(f"User ID match - Access GRANTED for user {user_id} ({full_name})")
         
         # Nếu có cấu hình subject và department được phép -> cho phép truy cập  
         if allowed_subjects and department_check_passed:
             has_access = True
+            logger.info(f"Department ID match - Access GRANTED for user {user_id} ({full_name}) with department {department_id}")
         
-        if has_access:
-            logger.info(f"Access GRANTED for user {user_id} ({full_name}) with department {user_department}")
-        else:
-            logger.warning(f"Access DENIED for user {user_id} ({full_name}) with department {user_department}")
-            logger.warning(f"User check: {'PASSED' if user_check_passed else 'FAILED'}, Department check: {'PASSED' if department_check_passed else 'FAILED'}")
+        if not has_access:
+            logger.warning(f"Access DENIED for user {user_id} ({full_name}) with department {department_id}")
+            logger.warning(f"User check: {'PASSED' if user_check_passed else 'FAILED'} (allowed: {allowed_users}), Department check: {'PASSED' if department_check_passed else 'FAILED'} (allowed: {allowed_subjects})")
         
         return has_access
         
     except Exception as e:
-        logger.error(f"Error checking file access permission v2: {str(e)}")
+        logger.error(f"Error checking file access permission: {str(e)}")
         return False
 def verify_and_check_file_access(
     file_metadata: Dict[str, Any], 

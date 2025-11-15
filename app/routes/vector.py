@@ -583,8 +583,11 @@ async def search_with_llm(request: VectorSearchRequest, current_user: dict = Dep
                     "metadata": metadata
                 })
             
-            # Take top k
-            top_results = search_results[:request.k]
+            # Apply access control filtering
+            accessible_results = filter_accessible_files(current_user, search_results)
+            
+            # Take top k after permission filtering
+            top_results = accessible_results[:request.k]
 
             # Generate LLM response
             llm_response = "Không tìm thấy tài liệu với thông tin được cung cấp."
@@ -671,13 +674,23 @@ class ConversationRequest(BaseModel):
 
 # Khởi tạo Session Manager (đặt ở đầu file hoặc trong config)
 def get_session_manager():
-    """Khởi tạo Semantic Session Manager với Redis"""
+    """Khởi tạo Semantic Session Manager với Redis - dùng HuggingFace vectorizer"""
+    from redisvl.utils.vectorize import HFTextVectorizer
+    
     client = get_redis_client()
+    
+    # Tạo vectorizer với model tiếng Việt
+    # QUAN TRỌNG: Truyền trust_remote_code=True cho model này
+    vectorizer = HFTextVectorizer(
+        model="dangvantuan/vietnamese-document-embedding",
+        trust_remote_code=True  # Bắt buộc cho model này
+    )
     
     session_manager = SemanticSessionManager(
         name="chat_sessions",
         redis_client=client,
         distance_threshold=0.3,  # Ngưỡng để lọc context liên quan
+        vectorizer=vectorizer  # Truyền vectorizer đúng cách
     )
     
     return session_manager

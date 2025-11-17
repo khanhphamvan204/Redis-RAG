@@ -664,81 +664,6 @@ Hãy trả lời câu hỏi dựa trên tài liệu trên.
     except Exception as e:
         logger.error(f"Lỗi: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ")
-    
-
-
-# Cache cho từng session (dict user_id -> history)
-_session_cache = {}
-_session_lock = None
-
-try:
-    import threading
-    _session_lock = threading.Lock()
-except ImportError:
-    class DummyLock:
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-    _session_lock = DummyLock()
-
-# Tạo index CHUNG 1 lần duy nhất (có thể chạy riêng hoặc kiểm tra tồn tại)
-async def ensure_message_history_index():
-    redis_client = get_redis_client()
-    index_name = "msg_history_index"
-    
-    try:
-        # Thử lấy index cũ
-        index = SearchIndex.from_existing(index_name, redis_client=redis_client)
-        logger.info("Đã tìm thấy msg_history_index hiện có")
-        return index
-    except Exception as e:
-        logger.info("Chưa có msg_history_index, đang tạo mới...")
-    
-    # Chỉ tạo 1 lần duy nhất, không overwrite
-    msg_schema = {
-        "index": {
-            "name": index_name,
-            "prefix": "msg:", 
-            "storage_type": "json"
-        },
-        "fields": [
-            {"name": "content", "type": "text"},
-            {"name": "embedding", "type": "vector", 
-             "attrs": {"dims": 768, "distance_metric": "cosine", "algorithm": "flat", "datatype": "float32"}},
-            {"name": "role", "type": "tag"},
-            {"name": "session_id", "type": "tag"},
-            {"name": "timestamp", "type": "numeric", "attrs": {"sortable": True}}
-        ]
-    }
-    
-    index = SearchIndex.from_dict(msg_schema)
-    index.set_client(redis_client)
-    index.create(overwrite=False)  # ← quan trọng: overwrite=False
-    logger.info("Tạo msg_history_index thành công")
-    return index
-
-def get_session_history(session_id: str) -> SemanticMessageHistory:
-    if session_id not in _session_cache:
-        with _session_lock:
-            if session_id not in _session_cache:
-                vectorizer = HFTextVectorizer(
-                    model="dangvantuan/vietnamese-document-embedding",
-                    device="cpu",
-                    trust_remote_code=True
-                )
-                
-                # Đảm bảo index tồn tại (gọi 1 lần khi khởi động app là tốt nhất)
-                # Không tạo lại trong đây nữa!
-                
-                _session_cache[session_id] = SemanticMessageHistory(
-                    name=f"history_{session_id}",       # tên khác nhau → phân biệt session
-                    redis_client=get_redis_client(),
-                    vectorizer=vectorizer,
-                    index_name="msg_history_index",     # ← tất cả dùng CHUNG index này
-                    ttl=60*60*24*30,  # optional: tự xóa sau 30 ngày
-                    key_prefix="msg:"   # vẫn dùng chung prefix
-                )
-                logger.info(f"Tạo history cho session: {session_id}")
-    return _session_cache[session_id]
 
 
 # === Pydantic Model mở rộng ===
@@ -760,193 +685,374 @@ def standardization(distance: float) -> float:
     return 1 - (distance / 2)
 
 
-# === Endpoint đã fix ===
+# app/routes/vector.py - Phần được cải tiến
+
+# ... (giữ nguyên imports và các hàm trước đó)
+
+# ============================================
+# SESSION MANAGEMENT - SIMPLIFIED
+# ============================================
+
+_session_cache = {}
+_session_lock = None
+
+try:
+    import threading
+    _session_lock = threading.Lock()
+except ImportError:
+    class DummyLock:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    _session_lock = DummyLock()
+
+
+async def ensure_message_history_index():
+    """
+    Tạo index CHUNG cho tất cả message history
+    CHỈ GỌI 1 LẦN khi khởi động app!
+    """
+    redis_client = get_redis_client()
+    index_name = "msg_history_idx"  # Index chung cho tất cả sessions
+    
+    try:
+        index = SearchIndex.from_existing(index_name, redis_client=redis_client)
+        logger.info("Đã tìm thấy msg_history_idx")
+        return index
+    except Exception:
+        logger.info("Đang tạo msg_history_idx mới...")
+    
+    # Schema cho message history - dùng session_tag để phân biệt
+    msg_schema = {
+        "index": {
+            "name": index_name,
+            "prefix": "msg:",  # Prefix chung
+            "storage_type": "json"
+        },
+        "fields": [
+            {"name": "content", "type": "text"},
+            {"name": "embedding", "type": "vector", 
+             "attrs": {
+                 "dims": 768,
+                 "distance_metric": "cosine",
+                 "algorithm": "flat",
+                 "datatype": "float32"
+             }},
+            {"name": "role", "type": "tag"},
+            {"name": "session_tag", "type": "tag"},  # Phân biệt session qua tag
+            {"name": "timestamp", "type": "numeric", "attrs": {"sortable": True}}
+        ]
+    }
+    
+    index = SearchIndex.from_dict(msg_schema)
+    index.set_client(redis_client)
+    index.create(overwrite=False)
+    logger.info("Tạo msg_history_idx thành công")
+    return index
+
+
+def get_session_history(session_id: str) -> SemanticMessageHistory:
+    """
+    Lấy hoặc tạo session history
+    Tất cả sessions dùng CHUNG 1 index, phân biệt nhau bằng session_tag
+    """
+    if session_id not in _session_cache:
+        with _session_lock:
+            if session_id not in _session_cache:
+                vectorizer = HFTextVectorizer(
+                    model="dangvantuan/vietnamese-document-embedding",
+                    device="cpu",
+                    trust_remote_code=True
+                )
+                
+                # name = index name (dùng chung)
+                # session_tag = unique session identifier
+                _session_cache[session_id] = SemanticMessageHistory(
+                    name="msg_history_idx",  # ← Index chung cho tất cả
+                    session_tag=session_id,   # ← Phân biệt session
+                    redis_client=get_redis_client(),
+                    vectorizer=vectorizer,
+                    ttl=60*60*24*7,  # 7 ngày
+                    prefix="msg:"     # ← Prefix chung
+                )
+                logger.info(f"✓ Tạo history mới cho session: {session_id}")
+    return _session_cache[session_id]
+    return _session_cache[session_id]
+
+
+# ============================================
+# CONTEXT BUILDER - SIMPLIFIED & SMART
+# ============================================
+
+class ContextBuilder:
+    """Xây dựng context thông minh cho LLM"""
+    
+    @staticmethod
+    def build_document_context(results: List[Dict], max_tokens: int = 5000) -> str:
+        """
+        Tạo context từ documents với giới hạn tokens
+        
+        Args:
+            results: List documents từ vector search
+            max_tokens: Giới hạn tokens (tính sơ bộ: ~0.75 token/char tiếng Việt)
+        """
+        if not results:
+            return "Không có tài liệu liên quan."
+        
+        context_parts = []
+        estimated_tokens = 0
+        max_chars = int(max_tokens * 1.3)  # ~0.75 token/char
+        
+        for i, result in enumerate(results, 1):
+            content = result['content']
+            filename = result['metadata']['filename']
+            
+            # Format document snippet
+            doc_snippet = f"**Tài liệu {i}: {filename}**\n{content}\n"
+            
+            # Kiểm tra giới hạn
+            if estimated_tokens + len(doc_snippet) > max_chars:
+                # Cắt bớt content
+                remaining_chars = max_chars - estimated_tokens - 100
+                if remaining_chars > 200:
+                    content_truncated = content[:remaining_chars] + "..."
+                    doc_snippet = f"**Tài liệu {i}: {filename}**\n{content_truncated}\n"
+                    context_parts.append(doc_snippet)
+                break
+            
+            context_parts.append(doc_snippet)
+            estimated_tokens += len(doc_snippet)
+        
+        return "\n".join(context_parts)
+    
+    @staticmethod
+    def build_history_context(
+        history: SemanticMessageHistory,
+        current_query: str,
+        max_messages: int = 4
+    ) -> tuple[str, int]:
+        """
+        Lấy lịch sử chat liên quan (semantic search)
+        
+        Returns:
+            (context_string, số_messages_sử_dụng)
+        """
+        try:
+            # Tìm messages liên quan semantic
+            relevant_msgs = history.get_relevant(
+                prompt=current_query,
+                top_k=max_messages,
+                as_text=False
+            )
+            
+            if not relevant_msgs:
+                return "", 0
+            
+            # Format lịch sử
+            history_parts = ["**Lịch sử chat liên quan:**"]
+            for msg in relevant_msgs[-max_messages:]:  # Lấy tối đa max_messages
+                role = "Bạn" if msg.get('role') == 'user' else "AI"
+                content = msg.get('content', '')[:300]  # Giới hạn mỗi message
+                history_parts.append(f"{role}: {content}")
+            
+            return "\n".join(history_parts), len(relevant_msgs)
+        
+        except Exception as e:
+            logger.warning(f"⚠ Không lấy được lịch sử: {e}")
+            return "", 0
+    
+
+
+
+# ============================================
+# ENDPOINT - CLEAN & EFFICIENT
+# ============================================
+
 @router.post("/search-with-llm-context", response_model=SearchWithContextResponse)
 async def search_with_llm_context(
     request: SearchWithContextRequest,
     current_user: dict = Depends(verify_token_v2)
 ):
+    """
+    Tìm kiếm documents + tích hợp lịch sử chat thông minh
+    
+    Flow:
+    1. Vector search documents
+    2. Quyết định có dùng history không (smart logic)
+    3. Build context hợp lý
+    4. Gọi LLM
+    5. Lưu vào session
+    """
     start_time = time.time()
     user_id = str(current_user.get("id"))
-
+    
     try:
-        # === 1. Tạo hoặc lấy session_id ===
+        # ========================================
+        # 1. QUẢN LÝ SESSION
+        # ========================================
         session_id = request.session_id
-
         if not session_id:
-            # Tạo session_id duy nhất theo user + thời gian + uuid
-            session_id = f"usr:{user_id}:sess:{int(datetime.now().timestamp())}:{str(uuid.uuid4())[:8]}"
-            logger.info(f"[SESSION] Tạo session mới: {session_id}")
+            session_id = f"usr:{user_id}:sess:{int(time.time())}:{str(uuid.uuid4())[:8]}"
+            logger.info(f"Session mới: {session_id}")
         else:
-            logger.info(f"[SESSION] Dùng session cũ: {session_id}")        
-
-        # === 2. Lấy Redis index ===
-        index_name = f"doc_index_{request.file_type}"
+            logger.info(f"Tiếp tục session: {session_id}")
+        
+        # ========================================
+        # 2. VECTOR SEARCH DOCUMENTS
+        # ========================================
+        index_name = get_index_name(request.file_type)
         client = get_redis_client()
-
+        
         try:
             index = SearchIndex.from_existing(index_name, redis_client=client)
         except Exception as e:
-            logger.warning(f"No index found for {request.file_type}: {str(e)}")
+            logger.warning(f"Không tìm thấy index {request.file_type}: {e}")
             return SearchWithContextResponse(
-                llm_response="Không tìm thấy tài liệu với thông tin được cung cấp.",
+                llm_response="Không tìm thấy tài liệu nào.",
                 contexts=[],
                 session_id=session_id,
                 history_used=False,
                 history_count=0
             )
-
-        # === 3. Tạo embedding cho query ===
-        try:
-            embedding_model = get_embedding_model()
-            query_embedding = embedding_model.embed_query(request.query)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Không thể tạo embedding: {str(e)}")
-
-        # === 4. Vector Search (giữ nguyên logic cũ) ===
-        try:
-            vector_query = VectorQuery(
-                vector=query_embedding,
-                vector_field_name="embedding",
-                return_fields=[
-                    "content", "doc_id", "filename", "file_type",
-                    "uploaded_by", "role_user", "role_subject",
-                    "created_at", "url"
-                ],
-                num_results=request.k * 2
-            )
-            results = index.query(vector_query)
-
-            search_results = []
-            for result in results:
-                distance = float(result.get('vector_distance', 2.0))
-                similarity = standardization(distance)
-
-                if similarity < request.similarity_threshold:
-                    continue
-
-                role_user = result.get('role_user', '').split(',') if result.get('role_user') else []
-                role_subject = result.get('role_subject', '').split(',') if result.get('role_subject') else []
-
-                metadata = {
-                    '_id': result.get('doc_id', ''),
-                    'filename': result.get('filename', ''),
-                    'file_type': result.get('file_type', ''),
-                    'uploaded_by': result.get('uploaded_by', ''),
-                    'role': {
-                        'user': [u.strip() for u in role_user if u.strip()],
-                        'subject': [s.strip() for s in role_subject if s.strip()]
-                    },
-                    'createdAt': result.get('created_at', ''),
-                    'url': result.get('url', ''),
-                    'similarity_score': round(float(similarity), 4)
-                }
-
-                search_results.append({
-                    "content": result.get('content', ''),
-                    "metadata": metadata
-                })
-
-            accessible_results = filter_accessible_files(current_user, search_results)
+        
+        # Generate query embedding
+        embedding_model = get_embedding_model()
+        query_embedding = embedding_model.embed_query(request.query)
+        
+        # Search
+        vector_query = VectorQuery(
+            vector=query_embedding,
+            vector_field_name="embedding",
+            return_fields=[
+                "content", "doc_id", "filename", "file_type",
+                "uploaded_by", "role_user", "role_subject",
+                "created_at", "url"
+            ],
+            num_results=request.k * 2
+        )
+        results = index.query(vector_query)
+        
+        # Process & filter results
+        search_results = []
+        for result in results:
+            distance = float(result.get('vector_distance', 2.0))
+            similarity = standardization(distance)
             
-            # Take top k after permission filtering
-            top_results = accessible_results[:request.k]
-
-        except Exception as e:
-            logger.error(f"Vector search thất bại: {traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail=f"Tìm kiếm thất bại: {str(e)}")
-
-        # === 5. Lấy ngữ cảnh từ lịch sử session (Semantic) ===
-        historical_context = ""
-        history_count = 0
-        history_used = False
-
-        try:
-            history = get_session_history(session_id)
-            # Use get_relevant() with correct parameters
-            relevant_history = history.get_relevant(
-                prompt=request.query,
-                top_k=6,
-                as_text=False
-            )
-            if relevant_history:
-                historical_context = "\n\n".join([
-                    f"[{msg.get('role', 'unknown').upper()}] {msg.get('content', '')[:500]}{'...' if len(msg.get('content', '')) > 500 else ''}"
-                    for msg in relevant_history
-                ])
-                history_count = len(relevant_history)
-                history_used = True
-                logger.info(f"[HISTORY] Dùng {history_count} tin nhắn lịch sử liên quan.")
-        except Exception as e:
-            logger.warning(f"Lấy lịch sử thất bại: {e}")
-
-        # === 6. Tạo context tổng hợp ===
-        doc_context = "\n\n".join([
-            f"**Tài liệu {i+1}: {result['metadata']['filename']}**\n{result['content']}"
-            for i, result in enumerate(top_results)
-        ]) if top_results else "Không có tài liệu phù hợp."
-
-        full_context = f"{historical_context}\n\n{doc_context}".strip()
-        if not full_context.strip():
-            full_context = "Không có thông tin tham khảo."
-
-        # === 7. Gọi LLM với context đầy đủ ===
-        llm_response = "Xin lỗi, tôi không tìm thấy thông tin liên quan trong tài liệu."
-
-        if top_results or historical_context:
+            if similarity < request.similarity_threshold:
+                continue
+            
+            role_user = result.get('role_user', '').split(',') if result.get('role_user') else []
+            role_subject = result.get('role_subject', '').split(',') if result.get('role_subject') else []
+            
+            metadata = {
+                '_id': result.get('doc_id', ''),
+                'filename': result.get('filename', ''),
+                'file_type': result.get('file_type', ''),
+                'uploaded_by': result.get('uploaded_by', ''),
+                'role': {
+                    'user': [u.strip() for u in role_user if u.strip()],
+                    'subject': [s.strip() for s in role_subject if s.strip()]
+                },
+                'createdAt': result.get('created_at', ''),
+                'url': result.get('url', ''),
+                'similarity_score': round(float(similarity), 4)
+            }
+            
+            search_results.append({
+                "content": result.get('content', ''),
+                "metadata": metadata
+            })
+        
+        # Access control
+        accessible_results = filter_accessible_files(current_user, search_results)
+        top_results = accessible_results[:request.k]
+        
+        # ========================================
+        # 3. BUILD CONTEXT (LUÔN BAO GỒM HISTORY)
+        # ========================================
+        builder = ContextBuilder()
+        
+        # Document context (luôn có)
+        doc_context = builder.build_document_context(top_results, max_tokens=3000)
+        
+        # History context (luôn lấy nếu có)
+        history = get_session_history(session_id)
+        history_context, history_count = builder.build_history_context(
+            history,
+            request.query,
+            max_messages=3  # Giới hạn 3 messages liên quan nhất
+        )
+        
+        history_used = history_count > 0
+        if history_used:
+            logger.info(f"Sử dụng {history_count} messages lịch sử")
+        else:
+            logger.info("Không sử dụng lịch sử chat")
+        
+        # Combine contexts - luôn ghép cả history và documents
+        if history_context:
+            full_context = f"{history_context}\n\n---\n\n{doc_context}"
+        else:
+            full_context = doc_context
+        
+        # ========================================
+        # 4. GỌI LLM
+        # ========================================
+        llm_response = "Xin lỗi, tôi không tìm thấy thông tin phù hợp."
+        
+        if top_results or history_used:
             try:
-                llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-
+                llm = ChatGoogleGenerativeAI(
+                    model="gemini-2.5-flash",
+                    temperature=0.3
+                )
+                
+                # Prompt đơn giản, rõ ràng
                 prompt_template = PromptTemplate(
                     input_variables=["query", "context"],
-                    template="""
-Bạn là trợ lý AI chuyên nghiệp, **chỉ trả lời dựa trên ngữ cảnh dưới đây**.
+                    template="""Bạn là trợ lý AI chuyên nghiệp.
 
-**Nguyên tắc**:
-- Không thêm thông tin ngoài
-- Không suy đoán
-- Nếu không đủ dữ liệu: "Xin lỗi, tôi không tìm thấy thông tin liên quan."
+**Nguyên tắc:**
+- Chỉ trả lời dựa trên ngữ cảnh bên dưới
+- Không thêm thông tin bên ngoài
+- Trả lời tự nhiên, dễ hiểu
+- Có thể tham khảo lịch sử chat nếu câu hỏi liên quan
 
-**Cấu trúc trả lời**:
-1. **Tóm tắt ngắn gọn** (1-2 câu)
-2. **Nội dung chi tiết** (danh sách gạch đầu dòng hoặc số thứ tự)
-3. **Kết luận** (nếu cần)
-
-**Dùng markdown**: **in đậm**, `code`, > trích dẫn.
-
----
-
-**Câu hỏi người dùng**:
+**Câu hỏi:**
 {query}
 
-**Ngữ cảnh (lịch sử + tài liệu)**:
+**Ngữ cảnh:**
 {context}
 
 ---
-
-Hãy trả lời chính xác, tự nhiên và hữu ích.
-"""
+Hãy trả lời câu hỏi dựa trên ngữ cảnh trên và khi trả lời đừng nói đến dựa theo ngữ cảnh mà tôi cung cấp."""
                 )
-
-                prompt = prompt_template.format(query=request.query, context=full_context)
+                
+                prompt = prompt_template.format(
+                    query=request.query,
+                    context=full_context
+                )
+                
                 result = llm.invoke(prompt)
                 llm_response = result.content
-
+                
             except Exception as e:
-                logger.error(f"LLM invoke thất bại: {str(e)}")
+                logger.error(f"LLM thất bại: {e}")
                 llm_response = "Không thể tạo phản hồi từ AI."
-
-        # === 8. Lưu tin nhắn vào session ===
+        
+        # ========================================
+        # 5. LƯU VÀO SESSION
+        # ========================================
         try:
             history = get_session_history(session_id)
-            # Use add_message() with correct dict format
             history.add_message({"role": "user", "content": request.query})
             history.add_message({"role": "assistant", "content": llm_response})
-            logger.info(f"[SESSION] Đã lưu 2 tin nhắn vào {session_id}")
+            logger.info(f"💾 Đã lưu vào session {session_id}")
         except Exception as e:
             logger.warning(f"Lưu session thất bại: {e}")
-
-        # === 9. Trả về kết quả ===
+        
+        # ========================================
+        # 6. TRẢ VỀ KẾT QUẢ
+        # ========================================
         return SearchWithContextResponse(
             llm_response=llm_response,
             contexts=top_results,
@@ -954,9 +1060,44 @@ Hãy trả lời chính xác, tự nhiên và hữu ích.
             history_used=history_used,
             history_count=history_count
         )
-
+    
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Lỗi endpoint: {traceback.format_exc()}")
+        logger.error(f"💥 Lỗi: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ")
+
+
+# ============================================
+# HELPER ENDPOINT: XÓA LỊCH SỬ SESSION
+# ============================================
+
+@router.delete("/session/{session_id}")
+async def clear_session_history(
+    session_id: str,
+    current_user: dict = Depends(verify_token_v2)
+):
+    """Xóa toàn bộ lịch sử của 1 session"""
+    try:
+        if session_id in _session_cache:
+            history = _session_cache[session_id]
+            # Clear all messages
+            redis_client = get_redis_client()
+            pattern = f"msg:{session_id}:*"
+            keys = redis_client.keys(pattern)
+            if keys:
+                redis_client.delete(*keys)
+            
+            # Remove from cache
+            del _session_cache[session_id]
+            
+            return {
+                "message": f"Đã xóa {len(keys)} messages từ session {session_id}",
+                "session_id": session_id,
+                "deleted_count": len(keys)
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Session không tồn tại")
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi xóa session: {str(e)}")

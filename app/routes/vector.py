@@ -27,6 +27,7 @@ from langchain.schema import HumanMessage, AIMessage
 from typing import List, Optional, Dict, Any
 from langchain.prompts import PromptTemplate
 from redisvl.utils.vectorize.text.huggingface import HFTextVectorizer
+from app.services.query_rewriter import QueryRewriter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -625,11 +626,15 @@ Bạn là một trợ lý AI chuyên nghiệp, chỉ trả lời dựa trên th�
 2. **Nội dung chính**: Trình bày bằng danh sách có số thứ tự hoặc gạch đầu dòng
 3. **Kết luận** (nếu cần): Tóm lược hoặc lời khuyên
 
-💡 Format markdown:
+✨ **YÊU CẦU FORMAT MARKDOWN (QUAN TRỌNG)**:
+- **BẮT BUỘC** sử dụng Markdown format để trả lời
 - Dùng **số thứ tự** (1., 2., 3.) cho các bước hoặc quy trình
-- Dùng **gạch đầu dòng** (-, *, •) cho danh sách các ý
-- Dùng **bold** cho từ khóa quan trọng
+- Dùng **gạch đầu dòng** (-, *) cho danh sách các ý
+- Dùng **bold** (** **) cho từ khóa quan trọng
+- Dùng # ## ### cho tiêu đề phần (nếu cần)
 - Dùng > cho trích dẫn từ tài liệu (nếu cần)
+- Dùng ``` cho code hoặc ví dụ (nếu cần)
+- Dùng bảng (| |) nếu có dữ liệu dạng bảng
 
 ❓ Câu hỏi của người dùng:
 {query}
@@ -637,7 +642,7 @@ Bạn là một trợ lý AI chuyên nghiệp, chỉ trả lời dựa trên th�
 📂 Tài liệu tham khảo:
 {context}
 
-Hãy trả lời câu hỏi dựa trên tài liệu trên.
+Hãy trả lời câu hỏi dựa trên tài liệu trên với format Markdown đẹp mắt và dễ đọc.
 """
                     )
 
@@ -668,7 +673,8 @@ Hãy trả lời câu hỏi dựa trên tài liệu trên.
 
 # === Pydantic Model mở rộng ===
 class SearchWithContextRequest(VectorSearchRequest):
-    session_id: Optional[str] = None  # Nếu có, dùng lại session cũ
+    session_id: Optional[str] = None
+    disable_query_rewrite: bool = False  # Tùy chọn tắt rewriting
 
 
 class SearchWithContextResponse(BaseModel):
@@ -677,6 +683,9 @@ class SearchWithContextResponse(BaseModel):
     session_id: str
     history_used: bool = False
     history_count: int = 0
+    query_rewritten: bool = False
+    original_query: Optional[str] = None
+    rewritten_query: Optional[str] = None
 
 
 # === Hàm chuẩn hóa similarity (giữ nguyên từ code cũ) ===
@@ -695,6 +704,7 @@ def standardization(distance: float) -> float:
 
 _session_cache = {}
 _session_lock = None
+_query_rewriter = None
 
 try:
     import threading
@@ -705,6 +715,12 @@ except ImportError:
         def __exit__(self, *args): pass
     _session_lock = DummyLock()
 
+def get_query_rewriter() -> QueryRewriter:
+    """Singleton cho QueryRewriter"""
+    global _query_rewriter
+    if _query_rewriter is None:
+        _query_rewriter = QueryRewriter()
+    return _query_rewriter
 
 async def ensure_message_history_index():
     """
@@ -760,7 +776,7 @@ def get_session_history(session_id: str) -> SemanticMessageHistory:
             if session_id not in _session_cache:
                 vectorizer = HFTextVectorizer(
                     model="dangvantuan/vietnamese-document-embedding",
-                    device="cpu",
+                    device="cuda",
                     trust_remote_code=True
                 )
                 
@@ -774,8 +790,7 @@ def get_session_history(session_id: str) -> SemanticMessageHistory:
                     ttl=60*60*24*7,  # 7 ngày
                     prefix="msg:"     # ← Prefix chung
                 )
-                logger.info(f"✓ Tạo history mới cho session: {session_id}")
-    return _session_cache[session_id]
+                logger.info(f"Tạo history mới cho session: {session_id}")
     return _session_cache[session_id]
 
 
@@ -857,15 +872,11 @@ class ContextBuilder:
             return "\n".join(history_parts), len(relevant_msgs)
         
         except Exception as e:
-            logger.warning(f"⚠ Không lấy được lịch sử: {e}")
+            logger.warning(f"Không lấy được lịch sử: {e}")
             return "", 0
     
 
 
-
-# ============================================
-# ENDPOINT - CLEAN & EFFICIENT
-# ============================================
 
 @router.post("/search-with-llm-context", response_model=SearchWithContextResponse)
 async def search_with_llm_context(
@@ -873,17 +884,19 @@ async def search_with_llm_context(
     current_user: dict = Depends(verify_token_v2)
 ):
     """
-    Tìm kiếm documents + tích hợp lịch sử chat thông minh
+    Tìm kiếm documents + tích hợp lịch sử chat + Query Rewriting
     
     Flow:
-    1. Vector search documents
-    2. Quyết định có dùng history không (smart logic)
-    3. Build context hợp lý
-    4. Gọi LLM
-    5. Lưu vào session
+    1. Lấy lịch sử chat (nếu có session)
+    2. **Query Rewriting: Viết lại câu hỏi dựa trên context**
+    3. Vector search với query đã được cải thiện
+    4. Build context
+    5. Gọi LLM
+    6. Lưu vào session
     """
     start_time = time.time()
     user_id = str(current_user.get("id"))
+    original_query = request.query 
     
     try:
         # ========================================
@@ -897,7 +910,85 @@ async def search_with_llm_context(
             logger.info(f"Tiếp tục session: {session_id}")
         
         # ========================================
-        # 2. VECTOR SEARCH DOCUMENTS
+        # 2. QUERY REWRITING 
+        # ========================================
+        query_rewritten = False
+        rewritten_query = original_query
+        
+        if not request.disable_query_rewrite:
+            try:
+                # Lấy lịch sử để rewrite
+                history = get_session_history(session_id)
+                
+                # FIXED: Dùng API của SemanticMessageHistory để lấy messages
+                try:
+                    # Lấy tất cả messages từ session (đã sắp xếp theo thời gian)
+                    all_messages = history.get_recent(top_k=6, as_text=False)
+                    
+                    # DEBUG: Xem cấu trúc data
+                    if all_messages and len(all_messages) > 0:
+                        logger.debug(f"Message structure sample: {type(all_messages[0])}")
+                        logger.debug(f"Message content: {all_messages[0]}")
+                    
+                    # Convert sang format cần thiết
+                    history_messages = []
+                    for msg in all_messages:
+                        try:
+                            # Case 1: Dict format
+                            if isinstance(msg, dict):
+                                history_messages.append({
+                                    'role': msg.get('role', 'user'),
+                                    'content': msg.get('content', '')
+                                })
+                            # Case 2: LangChain BaseMessage
+                            elif hasattr(msg, 'type') and hasattr(msg, 'content'):
+                                role = 'user' if msg.type == 'human' else 'assistant'
+                                history_messages.append({
+                                    'role': role,
+                                    'content': msg.content
+                                })
+                            # Case 3: String (fallback)
+                            elif isinstance(msg, str):
+                                history_messages.append({
+                                    'role': 'user',
+                                    'content': msg
+                                })
+                            else:
+                                logger.warning(f"Unknown message type: {type(msg)}")
+                        except Exception as parse_error:
+                            logger.warning(f"Không parse được message: {parse_error}")
+                            continue
+                    
+                    logger.info(f"  Lấy được {len(history_messages)} messages cho rewriting")
+                    
+                except Exception as e:
+                    logger.warning(f"Không lấy được history: {e}")
+                    history_messages = []
+                
+                # Thực hiện rewriting
+                if history_messages:
+                    rewriter = get_query_rewriter()
+                    rewritten_query, query_rewritten = rewriter.rewrite(
+                        original_query, 
+                        history_messages
+                    )
+                    
+                    if query_rewritten:
+                        logger.info(f" Query rewriting:")
+                        logger.info(f"   Original: {original_query}")
+                        logger.info(f"   Rewritten: {rewritten_query}")
+                else:
+                    logger.info("Không có lịch sử, bỏ qua rewriting")
+                    
+            except Exception as e:
+                logger.warning(f"Query rewriting thất bại: {e}, dùng query gốc")
+                rewritten_query = original_query
+                query_rewritten = False
+        else:
+            logger.info("Query rewriting bị tắt")
+        
+        # ========================================
+        # 3. VECTOR SEARCH (dùng rewritten query!)
         # ========================================
         index_name = get_index_name(request.file_type)
         client = get_redis_client()
@@ -911,12 +1002,15 @@ async def search_with_llm_context(
                 contexts=[],
                 session_id=session_id,
                 history_used=False,
-                history_count=0
+                history_count=0,
+                query_rewritten=query_rewritten,
+                original_query=original_query if query_rewritten else None,
+                rewritten_query=rewritten_query if query_rewritten else None
             )
         
-        # Generate query embedding
+        # Generate embedding CHO REWRITTEN QUERY
         embedding_model = get_embedding_model()
-        query_embedding = embedding_model.embed_query(request.query)
+        query_embedding = embedding_model.embed_query(rewritten_query) 
         
         # Search
         vector_query = VectorQuery(
@@ -931,7 +1025,7 @@ async def search_with_llm_context(
         )
         results = index.query(vector_query)
         
-        # Process & filter results
+        # Process & filter results (giữ nguyên phần này)
         search_results = []
         for result in results:
             distance = float(result.get('vector_distance', 2.0))
@@ -967,35 +1061,31 @@ async def search_with_llm_context(
         top_results = accessible_results[:request.k]
         
         # ========================================
-        # 3. BUILD CONTEXT (LUÔN BAO GỒM HISTORY)
+        # 4. BUILD CONTEXT
         # ========================================
         builder = ContextBuilder()
         
-        # Document context (luôn có)
+        # Document context
         doc_context = builder.build_document_context(top_results, max_tokens=3000)
         
-        # History context (luôn lấy nếu có)
+        # History context (semantic search)
         history = get_session_history(session_id)
         history_context, history_count = builder.build_history_context(
             history,
-            request.query,
-            max_messages=3  # Giới hạn 3 messages liên quan nhất
+            rewritten_query,  # Dùng rewritten query cho semantic search
+            max_messages=3
         )
         
         history_used = history_count > 0
-        if history_used:
-            logger.info(f"Sử dụng {history_count} messages lịch sử")
-        else:
-            logger.info("Không sử dụng lịch sử chat")
         
-        # Combine contexts - luôn ghép cả history và documents
+        # Combine contexts
         if history_context:
             full_context = f"{history_context}\n\n---\n\n{doc_context}"
         else:
             full_context = doc_context
         
         # ========================================
-        # 4. GỌI LLM
+        # 5. GỌI LLM (dùng ORIGINAL query trong prompt!)
         # ========================================
         llm_response = "Xin lỗi, tôi không tìm thấy thông tin phù hợp."
         
@@ -1006,7 +1096,6 @@ async def search_with_llm_context(
                     temperature=0.3
                 )
                 
-                # Prompt đơn giản, rõ ràng
                 prompt_template = PromptTemplate(
                     input_variables=["query", "context"],
                     template="""Bạn là trợ lý AI chuyên nghiệp.
@@ -1017,18 +1106,29 @@ async def search_with_llm_context(
 - Trả lời tự nhiên, dễ hiểu
 - Có thể tham khảo lịch sử chat nếu câu hỏi liên quan
 
-**Câu hỏi:**
+**YÊU CẦU FORMAT MARKDOWN (QUAN TRỌNG):**
+- **BẮT BUỘC** sử dụng Markdown format để trả lời
+- Dùng **số thứ tự** (1., 2., 3.) cho các bước hoặc quy trình
+- Dùng **gạch đầu dòng** (-, *) cho danh sách các ý
+- Dùng **bold** (** **) cho từ khóa quan trọng
+- Dùng # ## ### cho tiêu đề phần (nếu cần)
+- Dùng > cho trích dẫn (nếu cần)
+- Dùng ``` cho code hoặc ví dụ (nếu cần)
+- Dùng bảng (| |) nếu có dữ liệu dạng bảng
+
+**Câu hỏi của người dùng:**
 {query}
 
 **Ngữ cảnh:**
 {context}
 
 ---
-Hãy trả lời câu hỏi dựa trên ngữ cảnh trên và khi trả lời đừng nói đến dựa theo ngữ cảnh mà tôi cung cấp."""
+Hãy trả lời câu hỏi dựa trên ngữ cảnh trên với format Markdown đẹp mắt và dễ đọc."""
                 )
                 
+                # Dùng ORIGINAL query cho LLM để giữ tính tự nhiên
                 prompt = prompt_template.format(
-                    query=request.query,
+                    query=original_query,
                     context=full_context
                 )
                 
@@ -1040,31 +1140,35 @@ Hãy trả lời câu hỏi dựa trên ngữ cảnh trên và khi trả lời �
                 llm_response = "Không thể tạo phản hồi từ AI."
         
         # ========================================
-        # 5. LƯU VÀO SESSION
+        # 6. LƯU VÀO SESSION (lưu original query!)
         # ========================================
         try:
             history = get_session_history(session_id)
-            history.add_message({"role": "user", "content": request.query})
+            # Lưu query gốc vào lịch sử
+            history.add_message({"role": "user", "content": original_query})
             history.add_message({"role": "assistant", "content": llm_response})
-            logger.info(f"💾 Đã lưu vào session {session_id}")
+            logger.info(f"Đã lưu vào session {session_id}")
         except Exception as e:
             logger.warning(f"Lưu session thất bại: {e}")
         
         # ========================================
-        # 6. TRẢ VỀ KẾT QUẢ
+        # 7. TRẢ VỀ KẾT QUẢ (bao gồm rewriting info)
         # ========================================
         return SearchWithContextResponse(
             llm_response=llm_response,
             contexts=top_results,
             session_id=session_id,
             history_used=history_used,
-            history_count=history_count
+            history_count=history_count,
+            query_rewritten=query_rewritten,
+            original_query=original_query if query_rewritten else None,
+            rewritten_query=rewritten_query if query_rewritten else None
         )
     
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"💥 Lỗi: {traceback.format_exc()}")
+        logger.error(f"Lỗi: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ")
 
 

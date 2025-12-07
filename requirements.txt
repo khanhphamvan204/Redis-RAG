@@ -44,3 +44,8 @@ pydantic[email]
 
 redis
 redisvl
+pydantic-settings==2.5.2
+PyJWT==2.9.0
+
+# Hadoop HDFS Integration
+hdfs==2.7.0

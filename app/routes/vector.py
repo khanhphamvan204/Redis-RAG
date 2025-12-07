@@ -28,6 +28,7 @@ from typing import List, Optional, Dict, Any
 from langchain.prompts import PromptTemplate
 from redisvl.utils.vectorize.text.huggingface import HFTextVectorizer
 from app.services.query_rewriter import QueryRewriter
+from app.services.hdfs_service import hdfs_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -114,6 +115,53 @@ async def add_vector_document(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
+        # ========================================
+        # HDFS AUTO-UPLOAD (Phase 3 Integration)
+        # ========================================
+        hdfs_upload_success = False
+        hdfs_path = None
+        try:
+            # Create HDFS directory structure: /data/documents/{file_type}/{date}
+            hdfs_dir = f"/data/documents/{file_type}/{datetime.now().strftime('%Y-%m-%d')}"
+            hdfs_service.create_directory(hdfs_dir)
+            
+            # Upload file to HDFS
+            hdfs_path = f"{hdfs_dir}/{file_name}"
+            hdfs_upload_success = hdfs_service.upload_file(
+                local_path=file_path,
+                hdfs_path=hdfs_path,
+                overwrite=True
+            )
+            
+            if hdfs_upload_success:
+                # Save metadata to HDFS
+                hdfs_metadata = {
+                    "doc_id": generated_id,
+                    "filename": file_name,
+                    "file_type": file_type,
+                    "uploaded_by": uploaded_by,
+                    "role": role,
+                    "created_at": created_at,
+                    "local_path": file_path,
+                    "hdfs_path": hdfs_path,
+                    "size_bytes": os.path.getsize(file_path)
+                }
+                
+                meta_path = f"{hdfs_dir}/{file_name}_meta.json"
+                hdfs_service.write_file(
+                    hdfs_path=meta_path,
+                    content=json.dumps(hdfs_metadata, indent=2),
+                    overwrite=True
+                )
+                
+                logger.info(f"Uploaded to HDFS: {hdfs_path}")
+            else:
+                logger.warning(f"HDFS upload failed for {file_name}")
+                
+        except Exception as hdfs_error:
+            logger.error(f"HDFS upload error: {str(hdfs_error)}")
+            # Continue anyway - không block main flow
+        
         # Save metadata and add to Redis
         try:
             save_metadata(metadata)
@@ -129,6 +177,8 @@ async def add_vector_document(
             "filename": file_name,
             "file_type": file_type,
             "file_path": file_path,
+            "hdfs_uploaded": hdfs_upload_success,
+            "hdfs_path": hdfs_path if hdfs_upload_success else None,
             "status": "created"
         }
         

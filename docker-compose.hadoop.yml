@@ -1,0 +1,149 @@
+version: "3.8"
+
+# ==========================================
+# HADOOP MINIMAL SETUP - CHỈ ĐỂ TESTING
+# ==========================================
+# Version tối giản với 1 DataNode + 1 NodeManager
+# ✅ Tiết kiệm RAM (chỉ ~2GB thay vì ~6GB)
+# ✅ Start nhanh hơn (30s thay vì 60-90s)
+# ✅ Đủ để test HDFS operations và Spark jobs
+# ⚠️  Không có replication (backup)
+# ⚠️  Không có fault tolerance
+# ==========================================
+
+services:
+  # ========================================
+  # HADOOP HDFS - NameNode (Master)
+  # ========================================
+  hadoop-namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-namenode
+    hostname: namenode
+    ports:
+      - "9870:9870" # NameNode Web UI
+      - "9000:9000" # HDFS RPC
+    volumes:
+      - hadoop-namenode:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=redis-rag-hadoop-minimal
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - CORE_CONF_hadoop_proxyuser_hue_hosts=*
+      - CORE_CONF_hadoop_proxyuser_hue_groups=*
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_replication=1 # CHỈ 1 REPLICA (không backup)
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ========================================
+  # HADOOP HDFS - DataNode (CHỈ 1)
+  # ========================================
+  hadoop-datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-datanode
+    hostname: datanode
+    ports:
+      - "9864:9864" # DataNode Web UI
+    volumes:
+      - hadoop-datanode:/hadoop/dfs/data
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_webhdfs_enabled=true
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_datanode_use_datanode_hostname=false
+      - HDFS_CONF_dfs_client_use_datanode_hostname=false
+    networks:
+      - app-network
+    depends_on:
+      hadoop-namenode:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9864"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ========================================
+  # HADOOP YARN - ResourceManager
+  # ========================================
+  hadoop-resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-resourcemanager
+    hostname: resourcemanager
+    ports:
+      - "8088:8088" # ResourceManager Web UI
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+      - YARN_CONF_yarn_resourcemanager_address=resourcemanager:8032
+      - YARN_CONF_yarn_resourcemanager_scheduler_address=resourcemanager:8030
+      - YARN_CONF_yarn_resourcemanager_resource__tracker_address=resourcemanager:8031
+      - YARN_CONF_yarn_log_aggregation_enable=true
+    networks:
+      - app-network
+    depends_on:
+      hadoop-namenode:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/cluster"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ========================================
+  # HADOOP YARN - NodeManager (CHỈ 1)
+  # ========================================
+  hadoop-nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-nodemanager
+    hostname: nodemanager
+    ports:
+      - "8042:8042" # NodeManager Web UI
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - YARN_CONF_yarn_resourcemanager_hostname=resourcemanager
+      - YARN_CONF_yarn_nodemanager_aux__services=mapreduce_shuffle
+      - YARN_CONF_yarn_nodemanager_resource_memory__mb=2048 # Giảm RAM xuống 2GB
+      - YARN_CONF_yarn_nodemanager_resource_cpu__vcores=2
+      - YARN_CONF_yarn_log_aggregation_enable=true
+    networks:
+      - app-network
+    depends_on:
+      hadoop-resourcemanager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8042/node"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+# ========================================
+# Volumes (Chỉ 2 thay vì 4)
+# ========================================
+volumes:
+  hadoop-namenode:
+    driver: local
+  hadoop-datanode:
+    driver: local
+
+# ========================================
+# Networks
+# ========================================
+networks:
+  app-network:
+    external: true

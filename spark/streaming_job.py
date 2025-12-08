@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration from environment variables
-MONGO_URI = os.getenv("DATABASE_URL", "mongodb://127.0.0.1:27017/faiss_db")
+MONGO_URI = os.getenv("MONGO_URI", os.getenv("DATABASE_URL", "mongodb://127.0.0.1:27017/faiss_db"))
 MONGO_DATABASE = os.getenv("MONGO_DATABASE", "faiss_db")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION_ANALYTICS", "query_analytics")
 
@@ -33,8 +33,8 @@ def create_spark_session():
         .appName("QueryAnalyticsStreaming") \
         .config("spark.mongodb.write.connection.uri", MONGO_URI) \
         .config("spark.jars.packages",
-                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
-                "org.mongodb.spark:mongo-spark-connector_2.12:10.2.0") \
+                "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.3,"
+                "org.mongodb.spark:mongo-spark-connector_2.12:10.3.0") \
         .getOrCreate()
 
 
@@ -63,7 +63,15 @@ def define_schema():
 def write_to_mongo(batch_df, batch_id, collection_suffix):
     """Write batch dataframe to MongoDB"""
     try:
-        if batch_df.count() > 0:
+        logger.info(f"Processing batch {batch_id} for {collection_suffix}...")
+        row_count = batch_df.count()
+        logger.info(f"Batch {batch_id} has {row_count} records")
+        
+        if row_count > 0:
+            # Show sample data for debugging
+            logger.info(f"Sample data from batch {batch_id}:")
+            batch_df.show(5, truncate=False)
+            
             batch_df.write \
                 .format("mongodb") \
                 .mode("append") \
@@ -71,9 +79,11 @@ def write_to_mongo(batch_df, batch_id, collection_suffix):
                 .option("collection", f"{MONGO_COLLECTION}_{collection_suffix}") \
                 .option("replaceDocument", "false") \
                 .save()
-            logger.info(f"Batch {batch_id} written to MongoDB ({collection_suffix}): {batch_df.count()} records")
+            logger.info(f"✓ Batch {batch_id} written to MongoDB ({collection_suffix}): {row_count} records")
+        else:
+            logger.info(f"Batch {batch_id} is empty, skipping write")
     except Exception as e:
-        logger.error(f"Error writing batch {batch_id} to MongoDB: {e}")
+        logger.error(f"✗ Error writing batch {batch_id} to MongoDB ({collection_suffix}): {e}", exc_info=True)
 
 
 def main():
@@ -91,12 +101,22 @@ def main():
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BROKER) \
         .option("subscribe", KAFKA_TOPIC) \
-        .option("startingOffsets", "latest") \
+        .option("startingOffsets", "earliest") \
         .option("failOnDataLoss", "false") \
         .load()
     
     # Parse JSON messages
     schema = define_schema()
+    
+    # DEBUG: Show raw messages from Kafka
+    logger.info("=== DEBUG: Showing raw Kafka messages ===")
+    raw_debug_query = raw_stream.selectExpr("CAST(value AS STRING) as json_str") \
+        .writeStream \
+        .outputMode("append") \
+        .format("console") \
+        .option("truncate", "false") \
+        .trigger(processingTime="10 seconds") \
+        .start()
     
     query_stream = raw_stream.selectExpr("CAST(value AS STRING) as json_str") \
         .select(from_json(col("json_str"), schema).alias("data")) \
@@ -104,14 +124,17 @@ def main():
         .withColumn("event_time", to_timestamp(col("timestamp")))
     
     logger.info("Schema defined. Starting aggregations...")
+    logger.info(f"MongoDB URI: {MONGO_URI}")
+    logger.info(f"MongoDB Database: {MONGO_DATABASE}")
+    logger.info(f"MongoDB Collection: {MONGO_COLLECTION}")
     
     # ========================================
-    # AGGREGATION 1: By Faculty (5-minute window)
+    # AGGREGATION 1: By Faculty (30-second window, MAXIMUM SPEED)
     # ========================================
     faculty_agg = query_stream \
-        .withWatermark("event_time", "10 minutes") \
+        .withWatermark("event_time", "30 seconds") \
         .groupBy(
-            window(col("event_time"), "5 minutes", "1 minute"),
+            window(col("event_time"), "30 seconds"),
             col("faculty")
         ) \
         .agg(
@@ -139,18 +162,19 @@ def main():
     faculty_query = faculty_agg.writeStream \
         .outputMode("append") \
         .foreachBatch(lambda df, id: write_to_mongo(df, id, "by_faculty")) \
+        .trigger(processingTime="5 seconds") \
         .option("checkpointLocation", "/tmp/checkpoint/faculty") \
         .start()
     
     logger.info("Faculty aggregation stream started")
     
     # ========================================
-    # AGGREGATION 2: By Year (5-minute window)
+    # AGGREGATION 2: By Year (30-second window, MAXIMUM SPEED)
     # ========================================
     year_agg = query_stream \
-        .withWatermark("event_time", "10 minutes") \
+        .withWatermark("event_time", "30 seconds") \
         .groupBy(
-            window(col("event_time"), "5 minutes", "1 minute"),
+            window(col("event_time"), "30 seconds"),
             col("year")
         ) \
         .agg(
@@ -174,18 +198,19 @@ def main():
     year_query = year_agg.writeStream \
         .outputMode("append") \
         .foreachBatch(lambda df, id: write_to_mongo(df, id, "by_year")) \
+        .trigger(processingTime="5 seconds") \
         .option("checkpointLocation", "/tmp/checkpoint/year") \
         .start()
     
     logger.info("Year aggregation stream started")
     
     # ========================================
-    # AGGREGATION 3: Faculty-Year Heatmap (15-minute window)
+    # AGGREGATION 3: Faculty-Year Heatmap (1-minute window, MAXIMUM SPEED)
     # ========================================
     heatmap_agg = query_stream \
-        .withWatermark("event_time", "20 minutes") \
+        .withWatermark("event_time", "30 seconds") \
         .groupBy(
-            window(col("event_time"), "15 minutes", "5 minutes"),
+            window(col("event_time"), "1 minute"),
             col("faculty"),
             col("year")
         ) \
@@ -207,6 +232,7 @@ def main():
     heatmap_query = heatmap_agg.writeStream \
         .outputMode("append") \
         .foreachBatch(lambda df, id: write_to_mongo(df, id, "heatmap")) \
+        .trigger(processingTime="5 seconds") \
         .option("checkpointLocation", "/tmp/checkpoint/heatmap") \
         .start()
     

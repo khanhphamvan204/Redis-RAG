@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  # Metabase for MongoDB Analytics Visualization
+  metabase:
+    image: metabase/metabase:latest
+    container_name: metabase-analytics
+    hostname: metabase
+    ports:
+      - "8090:3000"
+    environment:
+      # Database for Metabase metadata (using H2 embedded for simplicity)
+      MB_DB_TYPE: h2
+      MB_DB_FILE: /metabase-data/metabase.db
+
+      # Server settings
+      MB_JETTY_HOST: 0.0.0.0
+      MB_JETTY_PORT: 3000
+
+      # MongoDB connection will be configured via UI
+      # No authentication needed for local MongoDB
+
+    volumes:
+      - metabase-data:/metabase-data
+
+    # Use host network to access MongoDB on host machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  metabase-data:
+    driver: local

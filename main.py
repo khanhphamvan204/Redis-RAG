@@ -10,7 +10,8 @@ import uvicorn
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Import các router
-from app.routes import health, documents, vector, folder 
+from app.routes import health, documents, vector, folder
+from app.api.routes import analytics
 from app.routes.folder import startup_db_client, shutdown_db_client
 from app.config import Config
 from app.services.kafka_service import initialize_kafka, shutdown_kafka
@@ -84,6 +85,8 @@ app.include_router(health.router, prefix="/health")
 app.include_router(documents.router, prefix="/documents")
 app.include_router(vector.router, prefix="/documents/vector")
 app.include_router(folder.router)
+# Changed from /api to /analytics to avoid conflict with folder.py's /api routes
+app.include_router(analytics.router)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

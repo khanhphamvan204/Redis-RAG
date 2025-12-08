@@ -1,0 +1,101 @@
+version: "3.8"
+
+services:
+  # ============================================
+  # KAFKA ECOSYSTEM
+  # ============================================
+  # To run: docker-compose -f docker-compose.kafka.yml up -d
+  # To stop: docker-compose -f docker-compose.kafka.yml down
+
+  # Zookeeper for Kafka coordination
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # PLAINTEXT_HOST for external (localhost) access from your app
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+    depends_on:
+      - zookeeper
+    networks:
+      - kafka-network
+    restart: unless-stopped
+    healthcheck:
+      test: kafka-topics --bootstrap-server localhost:9092 --list
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # Kafka UI for monitoring and management
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    depends_on:
+      - kafka
+      - zookeeper
+    networks:
+      - kafka-network
+    restart: unless-stopped
+
+  # Spark Streaming for Real-time Analytics
+  spark-streaming:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    container_name: spark-streaming
+    ports:
+      - "4040:4040" # Spark UI
+    environment:
+      - KAFKA_BROKER_URL=kafka:29092
+      - KAFKA_TOPIC_QUERIES=user-queries
+      - MONGO_URI=mongodb://admin:123@host.docker.internal:27017/faiss_db?authSource=admin
+      - MONGO_DATABASE=faiss_db
+      - MONGO_COLLECTION_ANALYTICS=query_analytics
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - kafka-network
+    volumes:
+      - ./spark/streaming_job.py:/opt/spark/jobs/streaming_job.py
+      - spark-checkpoints:/tmp/checkpoint
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  kafka-network:
+    driver: bridge
+
+volumes:
+  spark-checkpoints:
+    driver: local

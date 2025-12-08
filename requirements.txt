@@ -49,3 +49,13 @@ PyJWT==2.9.0
 
 # Hadoop HDFS Integration
 hdfs==2.7.0
+
+# Kafka Integration
+aiokafka==0.10.0
+kafka-python==2.0.2
+
+# Spark Integration (for local testing)
+pyspark==3.5.0
+
+# Additional utilities
+python-dateutil

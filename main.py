@@ -13,6 +13,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from app.routes import health, documents, vector, folder 
 from app.routes.folder import startup_db_client, shutdown_db_client
 from app.config import Config
+from app.services.kafka_service import initialize_kafka, shutdown_kafka
+from app.routes.vector import ensure_message_history_index
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,15 +28,39 @@ async def on_startup():
     """
     Hàm này sẽ được gọi khi ứng dụng FastAPI khởi động.
     """
-    logger.info("Sự kiện startup: Đang khởi tạo kết nối CSDL...")
+    logger.info("Sự kiện startup: Đang khởi tạo các services...")
+    
+    # 1. Database
     await startup_db_client(app)
+    
+    # 2. Message history index
+    try:
+        await ensure_message_history_index()
+        logger.info("✓ Message history index initialized")
+    except Exception as e:
+        logger.warning(f"Message history init failed: {e}")
+    
+    # 3. Kafka producer
+    try:
+        await initialize_kafka()
+        logger.info("✓ Kafka producer initialized")
+    except Exception as e:
+        logger.warning(f"Kafka init failed (non-critical): {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     """
     Hàm này sẽ được gọi khi ứng dụng FastAPI tắt.
     """
-    logger.info("Sự kiện shutdown: Đang đóng kết nối CSDL...")
+    logger.info("Sự kiện shutdown: Đang đóng các kết nối...")
+    
+    # Shutdown Kafka
+    try:
+        await shutdown_kafka()
+    except Exception as e:
+        logger.error(f"Kafka shutdown error: {e}")
+    
+    # Shutdown database
     await shutdown_db_client(app)
 
 # Configure CORS

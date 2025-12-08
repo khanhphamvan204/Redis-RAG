@@ -29,9 +29,81 @@ from langchain.prompts import PromptTemplate
 from redisvl.utils.vectorize.text.huggingface import HFTextVectorizer
 from app.services.query_rewriter import QueryRewriter
 from app.services.hdfs_service import hdfs_service
+from app.services.query_tracker import get_query_tracker
+from pymongo import MongoClient
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# USER METADATA LOOKUP HELPER
+# ============================================
+
+def get_user_metadata_from_db(user_id: int) -> Dict[str, str]:
+    """
+    Lookup user metadata from MongoDB for query tracking
+    
+    Args:
+        user_id: User ID from JWT token
+        
+    Returns:
+        Dictionary with 'faculty' and 'year' fields
+    """
+    try:
+        client = MongoClient(Config.DATABASE_URL, serverSelectionTimeoutMS=3000)
+        db = client["faiss_db"]
+        
+        # Fetch user document
+        user_doc = db.users.find_one(
+            {"user_id": user_id},
+            {"_id": 0, "user_type": 1, "department_id": 1, "student_info": 1}
+        )
+        
+        if not user_doc:
+            logger.warning(f"User {user_id} not found in database")
+            return {"faculty": "Unknown", "year": "Unknown"}
+        
+        # Extract faculty from department
+        faculty = "Unknown"
+        year = "Unknown"
+        
+        department_id = user_doc.get("department_id")
+        if department_id:
+            dept_doc = db.departments.find_one(
+                {"department_id": department_id},
+                {"_id": 0, "department_name": 1}
+            )
+            if dept_doc:
+                faculty = dept_doc.get("department_name", "Unknown")
+        
+        # If faculty still unknown, use user_type as fallback
+        if faculty == "Unknown":
+            user_type = user_doc.get("user_type", "Unknown")
+            faculty = user_type  # e.g., "Giáo viên", "Sinh viên"
+        
+        # Extract year from student_info if available
+        student_info = user_doc.get("student_info", {})
+        if student_info and isinstance(student_info, dict):
+            # Try to extract year from enrollment_date or other fields
+            enrollment_date = student_info.get("enrollment_date")
+            if enrollment_date:
+                try:
+                    # Extract year from date string (e.g., "2024-09-01" -> "2024")
+                    year = enrollment_date[:4]
+                except:
+                    pass
+        
+        # If no year found, use department_id as fallback
+        if year == "Unknown" and department_id:
+            year = str(department_id)
+        
+        client.close()
+        return {"faculty": faculty, "year": year}
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch user metadata: {e}")
+        return {"faculty": "Unknown", "year": "Unknown"}
 
 
 class AddVectorRequest(BaseModel):
@@ -1202,8 +1274,48 @@ Hãy trả lời câu hỏi dựa trên ngữ cảnh trên với format Markdown
             logger.warning(f"Lưu session thất bại: {e}")
         
         # ========================================
-        # 7. TRẢ VỀ KẾT QUẢ (bao gồm rewriting info)
+        # 7. TRACKING QUERY (MongoDB + Kafka)
         # ========================================
+        response_time_ms = round((time.time() - start_time) * 1000, 2)
+        
+        try:
+            # Extract user_id from JWT token
+            user_id_int = current_user.get("user_id")
+            
+            # Lookup user metadata from MongoDB (faculty, year)
+            user_metadata = get_user_metadata_from_db(user_id_int)
+            faculty = user_metadata.get("faculty", "Unknown")
+            year = user_metadata.get("year", "Unknown")
+            
+            logger.info(f"Query tracking metadata - User: {user_id}, Faculty: {faculty}, Year: {year}")
+            
+            # Log query to MongoDB (async, non-blocking)
+            tracker = get_query_tracker()
+            query_id = await tracker.log_query(
+                user_id=user_id,
+                session_id=session_id,
+                query_text=original_query,
+                faculty=faculty,
+                year=year,
+                file_type=request.file_type,
+                response_time_ms=response_time_ms,
+                contexts_found=len(top_results),
+                k=request.k,
+                similarity_threshold=request.similarity_threshold,
+                rewritten_query=rewritten_query if query_rewritten else None,
+                query_rewritten=query_rewritten,
+                history_used=history_used,
+                history_count=history_count
+            )
+            
+            if query_id:
+                logger.info(f"Query tracked: {query_id[:8]}...")
+            else:
+                logger.warning("Query tracking failed (non-critical)")
+                
+        except Exception as e:
+            # Don't fail the request if tracking fails
+            logger.error(f"Query tracking error: {e}")
         return SearchWithContextResponse(
             llm_response=llm_response,
             contexts=top_results,

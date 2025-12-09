@@ -13,58 +13,89 @@ class FileType(str, Enum):
     ADMIN = "admin"
 
 
+class UserInfo(BaseModel):
+    """User information for query logging (unified for students and teachers)"""
+    user_id: int = Field(..., description="User ID from database")
+    user_type: str = Field(default="Unknown", description="User type (e.g., 'Học sinh', 'Giáo viên')")
+    department_id: Optional[int] = Field(None, description="Department ID")
+    code: Optional[str] = Field(None, description="Student code or Teacher code (e.g., 'K21.YDUOC.001' or 'T.NNA.103')")
+    years: Optional[int] = Field(None, description="Student year (1-5) or Teaching years, calculated from enrollment_date or hire_date")
+
+
+class RAGParams(BaseModel):
+    """RAG search parameters"""
+    k: int = Field(default=5, description="Number of results requested")
+    similarity_threshold: float = Field(default=0.0, description="Similarity threshold used")
+    context_found: int = Field(default=0, description="Number of contexts found")
+
+
+class RAGMetrics(BaseModel):
+    """RAG performance metrics"""
+    response_time_ms: float = Field(..., description="Time to generate response in milliseconds")
+    answer_length: int = Field(default=0, description="Length of answer text in characters")
+    answer_text: str = Field(default="", description="Full answer text from LLM")
+    success: bool = Field(default=True, description="Whether query was successful")
+
+
+class QueryMetadata(BaseModel):
+    """Additional query metadata"""
+    model_used: str = Field(default="gemini-2.5-flash", description="LLM model used")
+    history_used: bool = Field(default=False, description="Whether chat history was used")
+    history_count: int = Field(default=0, description="Number of history messages used")
+    query_rewritten: bool = Field(default=False, description="Whether query was rewritten")
+
+
 class QueryLog(BaseModel):
     """
-    Model for individual query logs
-    Stores each user query with metadata for tracking and analytics
+    Model for individual query logs (RESTRUCTURED)
+    Stores each user query with nested metadata for better organization
     """
     query_id: str = Field(..., description="Unique query identifier (UUID)")
-    user_id: str = Field(..., description="User ID from JWT token")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Query timestamp (UTC)")
+    
+    # Nested objects
+    user: UserInfo = Field(..., description="User information")
     session_id: str = Field(..., description="Session identifier")
+    
     query_text: str = Field(..., description="Original user query")
     rewritten_query: Optional[str] = Field(None, description="Query after rewriting (if applicable)")
     
-    # User context
-    faculty: str = Field(default="Unknown", description="User's faculty/department")
-    year: str = Field(default="Unknown", description="Academic year (e.g., '2025', 'Graduate')")
-    
-    # Query details
-    file_type: str = Field(..., description="Document type queried")
-    k: int = Field(default=5, description="Number of results requested")
-    
-    # Performance metrics
-    response_time_ms: float = Field(..., description="Time to generate response in milliseconds")
-    contexts_found: int = Field(default=0, description="Number of relevant contexts found")
-    similarity_threshold: float = Field(default=0.0, description="Similarity threshold used")
-    
-    # Query status
-    query_rewritten: bool = Field(default=False, description="Whether query was rewritten")
-    history_used: bool = Field(default=False, description="Whether chat history was used")
-    history_count: int = Field(default=0, description="Number of history messages used")
-    
-    # Timestamp
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Query timestamp (UTC)")
+    rag_params: RAGParams = Field(..., description="RAG search parameters")
+    rag_metrics: RAGMetrics = Field(..., description="RAG performance metrics")
+    metadata: QueryMetadata = Field(..., description="Additional metadata")
     
     class Config:
-        # Allow MongoDB _id field
         json_schema_extra = {
             "example": {
                 "query_id": "550e8400-e29b-41d4-a716-446655440000",
-                "user_id": "123",
-                "session_id": "usr:123:sess:1234567890:abcd1234",
+                "timestamp": "2025-12-09T07:35:00Z",
+                "user": {
+                    "user_id": 1005,
+                    "user_type": "Học sinh",
+                    "department_id": 104,
+                    "code": "K21.YDUOC.001",
+                    "years": 4
+                },
+                "session_id": "usr:1005:sess:1733720100:abcd1234",
                 "query_text": "Python là gì?",
                 "rewritten_query": None,
-                "faculty": "CNTT",
-                "year": "2025",
-                "file_type": "public",
-                "k": 5,
-                "response_time_ms": 1245.67,
-                "contexts_found": 5,
-                "similarity_threshold": 0.0,
-                "query_rewritten": False,
-                "history_used": False,
-                "history_count": 0,
-                "timestamp": "2025-12-07T15:00:00Z"
+                "rag_params": {
+                    "k": 5,
+                    "similarity_threshold": 0.0,
+                    "context_found": 5
+                },
+                "rag_metrics": {
+                    "response_time_ms": 1234.56,
+                    "answer_length": 512,
+                    "answer_text": "Python là một ngôn ngữ lập trình...",
+                    "success": True
+                },
+                "metadata": {
+                    "model_used": "gemini-2.5-flash",
+                    "history_used": False,
+                    "history_count": 0,
+                    "query_rewritten": False
+                }
             }
         }
 

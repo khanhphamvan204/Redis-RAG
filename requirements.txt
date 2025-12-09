@@ -6,6 +6,7 @@ pymongo
 motor
 python-multipart
 PyJWT
+websockets
 
 # Data Handling & Document Processing
 pdfplumber

@@ -1,4 +1,3 @@
-# app/services/kafka_service.py
 import logging
 import json
 import asyncio
@@ -37,12 +36,11 @@ async def initialize_kafka():
         )
         
         await _kafka_producer.start()
-        logger.info(f"Kafka producer started successfully - Topic: {KAFKA_TOPIC_QUERIES}")
+        logger.info(f"✓ Kafka producer started successfully - Topic: {KAFKA_TOPIC_QUERIES}")
         
     except Exception as e:
         logger.error(f"Failed to initialize Kafka producer: {e}")
         _kafka_producer = None
-        # Don't fail app startup if Kafka is unavailable
         logger.warning("Application will continue without Kafka integration")
 
 
@@ -94,13 +92,19 @@ async def publish_query_event(query_log: Dict) -> bool:
         
         # Convert datetime to ISO format
         if 'timestamp' in serializable_log:
-            serializable_log['timestamp'] = serializable_log['timestamp'].isoformat()
+            from datetime import datetime
+            if isinstance(serializable_log['timestamp'], datetime):
+                serializable_log['timestamp'] = serializable_log['timestamp'].isoformat()
         
         # Convert MongoDB ObjectId to string
         if '_id' in serializable_log:
             from bson import ObjectId
             if isinstance(serializable_log['_id'], ObjectId):
                 serializable_log['_id'] = str(serializable_log['_id'])
+        
+        # Log message structure for debugging
+        logger.info(f"Publishing to Kafka - Query ID: {serializable_log.get('query_id', 'unknown')[:8]}...")
+        logger.debug(f"Message structure: {json.dumps(serializable_log, indent=2)[:500]}...")
         
         # Send message to Kafka
         await producer.send_and_wait(
@@ -109,14 +113,14 @@ async def publish_query_event(query_log: Dict) -> bool:
             key=query_log.get('query_id', '').encode('utf-8') if query_log.get('query_id') else None
         )
         
-        logger.debug(f"Published query event to Kafka: {query_log.get('query_id', 'unknown')[:8]}...")
+        logger.info(f"✓ Published query event to Kafka: {query_log.get('query_id', 'unknown')[:8]}...")
         return True
         
     except KafkaError as e:
         logger.error(f"Kafka error publishing event: {e}")
         return False
     except Exception as e:
-        logger.error(f"Unexpected error publishing to Kafka: {e}")
+        logger.error(f"Unexpected error publishing to Kafka: {e}", exc_info=True)
         return False
 
 

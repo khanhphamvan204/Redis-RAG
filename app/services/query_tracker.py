@@ -2,7 +2,7 @@
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import PyMongoError
 import asyncio
@@ -43,13 +43,13 @@ class QueryTracker:
             db = client[self.db_name]
             collection = db[self.collection_name]
             
-            # Create indexes
+            # Create indexes for nested fields
             indexes = [
                 ("timestamp", ASCENDING),
-                ("user_id", ASCENDING),
-                ("faculty", ASCENDING),
-                ("year", ASCENDING),
-                ("file_type", ASCENDING),
+                ("user.user_id", ASCENDING),
+                ("user.user_type", ASCENDING),
+                ("user.years", ASCENDING),
+                ("user.department_id", ASCENDING),
                 ("session_id", ASCENDING),
             ]
             
@@ -59,8 +59,8 @@ class QueryTracker:
             # Compound index for analytics queries
             collection.create_index([
                 ("timestamp", ASCENDING),
-                ("faculty", ASCENDING),
-                ("year", ASCENDING)
+                ("user.user_type", ASCENDING),
+                ("user.years", ASCENDING)
             ], background=True)
             
             logger.info(f"Indexes created for {self.collection_name}")
@@ -79,9 +79,9 @@ class QueryTracker:
             result = collection.insert_one(query_log)
             
             logger.info(f"Query logged: {query_log['query_id'][:8]}... | "
-                       f"Faculty: {query_log['faculty']} | "
-                       f"Year: {query_log['year']} | "
-                       f"Time: {query_log['response_time_ms']:.2f}ms")
+                       f"User: {query_log['user']['user_type']} | "
+                       f"Years: {query_log['user'].get('years', 'N/A')} | "
+                       f"Time: {query_log['rag_metrics']['response_time_ms']:.2f}ms")
             
             return result.inserted_id is not None
             
@@ -91,36 +91,34 @@ class QueryTracker:
     
     async def log_query(
         self,
-        user_id: str,
+        user_info: Dict[str, Any],
         session_id: str,
         query_text: str,
-        faculty: str,
-        year: str,
-        file_type: str,
+        rewritten_query: Optional[str],
+        k: int,
+        similarity_threshold: float,
+        context_found: int,
         response_time_ms: float,
-        contexts_found: int,
-        k: int = 5,
-        similarity_threshold: float = 0.0,
-        rewritten_query: Optional[str] = None,
+        llm_response: str,
+        model_used: str = "gemini-2.5-flash",
         query_rewritten: bool = False,
         history_used: bool = False,
         history_count: int = 0
     ) -> Optional[str]:
         """
-        Log a user query asynchronously
+        Log a user query asynchronously with new nested structure
         
         Args:
-            user_id: User ID from JWT token
+            user_info: Dict with user_id, user_type, department_id, code, years
             session_id: Chat session ID
             query_text: Original query text
-            faculty: User's faculty
-            year: User's academic year
-            file_type: Document type queried
-            response_time_ms: Response time in milliseconds
-            contexts_found: Number of contexts found
+            rewritten_query: Rewritten query (if applicable)
             k: Number of results requested
             similarity_threshold: Similarity threshold used
-            rewritten_query: Rewritten query (if applicable)
+            context_found: Number of contexts found
+            response_time_ms: Response time in milliseconds
+            llm_response: Full LLM response text
+            model_used: LLM model name
             query_rewritten: Whether query was rewritten
             history_used: Whether chat history was used
             history_count: Number of history messages used
@@ -128,26 +126,50 @@ class QueryTracker:
         Returns:
             Query ID if successful, None otherwise
         """
+        from app.models import QueryLog, UserInfo, RAGParams, RAGMetrics, QueryMetadata
+        
         query_id = str(uuid.uuid4())
+        
+        # Create nested objects
+        user_obj = UserInfo(
+            user_id=user_info.get("user_id"),
+            user_type=user_info.get("user_type", "Unknown"),
+            department_id=user_info.get("department_id"),
+            code=user_info.get("code"),
+            years=user_info.get("years")
+        )
+        
+        rag_params = RAGParams(
+            k=k,
+            similarity_threshold=similarity_threshold,
+            context_found=context_found
+        )
+        
+        rag_metrics = RAGMetrics(
+            response_time_ms=response_time_ms,
+            answer_length=len(llm_response),
+            answer_text=llm_response,
+            success=True
+        )
+        
+        metadata = QueryMetadata(
+            model_used=model_used,
+            history_used=history_used,
+            history_count=history_count,
+            query_rewritten=query_rewritten
+        )
         
         # Create query log model
         query_log = QueryLog(
             query_id=query_id,
-            user_id=user_id,
+            timestamp=datetime.utcnow(),
+            user=user_obj,
             session_id=session_id,
             query_text=query_text,
             rewritten_query=rewritten_query,
-            faculty=faculty,
-            year=year,
-            file_type=file_type,
-            k=k,
-            response_time_ms=response_time_ms,
-            contexts_found=contexts_found,
-            similarity_threshold=similarity_threshold,
-            query_rewritten=query_rewritten,
-            history_used=history_used,
-            history_count=history_count,
-            timestamp=datetime.utcnow()
+            rag_params=rag_params,
+            rag_metrics=rag_metrics,
+            metadata=metadata
         )
         
         # Convert to dict for MongoDB

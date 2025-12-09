@@ -66,36 +66,7 @@ services:
       - kafka-network
     restart: unless-stopped
 
-  # Spark Streaming for Real-time Analytics
-  spark-streaming:
-    build:
-      context: ./spark
-      dockerfile: Dockerfile
-    container_name: spark-streaming
-    ports:
-      - "4040:4040" # Spark UI
-    environment:
-      - KAFKA_BROKER_URL=kafka:29092
-      - KAFKA_TOPIC_QUERIES=user-queries
-      - MONGO_URI=mongodb://host.docker.internal:27017/faiss_db
-      - MONGO_DATABASE=faiss_db
-      - MONGO_COLLECTION_ANALYTICS=query_analytics
-    depends_on:
-      kafka:
-        condition: service_healthy
-    networks:
-      - kafka-network
-    volumes:
-      - ./spark/streaming_job.py:/opt/spark/jobs/streaming_job.py
-      - spark-checkpoints:/tmp/checkpoint
-    restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
 networks:
   kafka-network:
+    name: kafka-network
     driver: bridge
-
-volumes:
-  spark-checkpoints:
-    driver: local

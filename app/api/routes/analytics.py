@@ -1,116 +1,385 @@
 # app/api/routes/analytics.py
 """
 Analytics API Routes  
-Metabase integration for real-time analytics visualization
+Redis-based real-time analytics
 """
 
 from fastapi import APIRouter, HTTPException
 from typing import Dict, List
 import logging
 import os
-from pymongo import MongoClient
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 logger = logging.getLogger(__name__)
 
-# Metabase configuration
-METABASE_BASE_URL = os.getenv("METABASE_URL", "http://localhost:8090")
+# Import Redis analytics service
+from app.services.redis_analytics_service import (
+    get_faculty_analytics,
+    get_year_analytics,
+    get_heatmap_analytics,
+    get_latest_update,
+    get_popular_questions,
+    get_department_analytics,
+    # NEW FUNCTIONS
+    get_student_year_analytics,
+    get_popular_questions_by_year,
+    get_user_type_distribution,
+    get_success_rate_analytics,
+    get_response_time_analytics,
+    get_timeseries_analytics,
+    get_hourly_heatmap
+)
 
-# MongoDB connection for health checks
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "faiss_db")
 
 
 @router.get("/health")
 async def check_analytics_health():
     """
-    Check MongoDB connection health for Charts
+    Check Redis connection health for Analytics
     
     Returns:
         {
             "status": "healthy" | "unhealthy",
-            "mongodb_uri": "...",
-            "collections": [...],
-            "charts_url": "..."
+            "redis_host": "...",
+            "latest_update": "..."
         }
     """
     try:
-        # Connect to MongoDB
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-        db = client[MONGODB_DATABASE]
-        
-        # Check if analytics collections exist
-        collections = db.list_collection_names()
-        analytics_collections = [
-            col for col in collections 
-            if col.startswith("query_analytics")
-        ]
-        
-        # Get sample counts
-        collection_stats = {}
-        for col_name in analytics_collections:
-            count = db[col_name].count_documents({})
-            collection_stats[col_name] = count
-        
-        client.close()
+        latest = get_latest_update()
         
         return {
-            "status": "healthy",
-            "mongodb_uri": MONGODB_URI,
-            "database": MONGODB_DATABASE,
-            "analytics_collections": analytics_collections,
-            "collection_stats": collection_stats,
-            "charts_url": METABASE_BASE_URL
+            "status": "healthy" if latest else "degraded",
+            "redis_host": os.getenv("REDIS_HOST", "redis-stack-db"),
+            "redis_port": os.getenv("REDIS_PORT", "6379"),
+            "latest_update": latest,
+            "message": "Analytics data available" if latest else "No analytics data yet"
         }
         
     except Exception as e:
-        logger.error(f"MongoDB health check failed: {e}")
+        logger.error(f"Redis health check failed: {e}")
         return {
             "status": "unhealthy",
-            "mongodb_uri": MONGODB_URI,
-            "error": str(e),
-            "charts_url": METABASE_BASE_URL
+            "error": str(e)
         }
 
 
-@router.get("/charts/embed-info")
-async def get_charts_embed_info():
+@router.get("/redis/faculty")
+async def get_faculty_analytics_endpoint(days: int = 30):
     """
-    Get Metabase embedding information
+    Get faculty analytics from Redis
     
-    Returns chart configuration that frontend needs to embed dashboards.
-    After creating questions/dashboards in Metabase UI, update these URLs.
+    Args:
+        days: Number of days to look back (default: 30)
+        
+    Returns:
+        List of faculty analytics
     """
+    try:
+        data = get_faculty_analytics(days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting faculty analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/year")
+async def get_year_analytics_endpoint(days: int = 30):
+    """
+    Get year analytics from Redis
     
-    # TODO: Update these URLs after creating charts in Metabase UI
-    # Access Metabase at http://localhost:8090 to create questions/dashboards
+    Args:
+        days: Number of days to look back (default: 30)
+        
+    Returns:
+        List of year analytics
+    """
+    try:
+        data = get_year_analytics(days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting year analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/heatmap")
+async def get_heatmap_analytics_endpoint(days: int = 30):
+    """
+    Get heatmap analytics from Redis
     
-    charts_info = {
-        "charts_base_url": METABASE_BASE_URL,
-        "instructions": {
-            "step_1": "Access Metabase at http://localhost:8090",
-            "step_2": "Complete initial setup wizard (create admin account)",
-            "step_3": "Add database: MongoDB at host.docker.internal:27017",
-            "step_4": "Select database: faiss_db",
-            "step_5": "Create questions (charts) from collections: query_analytics_by_faculty, query_analytics_by_year, query_analytics_heatmap",
-            "step_6": "Create dashboard and add questions",
-            "step_7": "Enable public sharing for dashboard and individual questions",
-            "step_8": "Copy public URLs and update the embed_urls below"
-        },
-        "embed_urls": {
-            "overview_dashboard": "http://localhost:8090/public/dashboard/02d0ec6b-cdce-4947-a0dd-4cb216b14990",
-            "faculty_chart": f"{METABASE_BASE_URL}/public/question/YOUR_FACULTY_QUESTION_HASH?bordered=false&titled=false",
-            "year_chart": f"{METABASE_BASE_URL}/public/question/YOUR_YEAR_QUESTION_HASH?bordered=false&titled=false",
-            "heatmap_chart": f"{METABASE_BASE_URL}/public/question/YOUR_HEATMAP_QUESTION_HASH?bordered=false&titled=false"
-        },
-        "available_collections": [
-            "query_analytics_by_faculty",
-            "query_analytics_by_year", 
-            "query_analytics_heatmap"
-        ]
-    }
+    Args:
+        days: Number of days to look back (default: 30)
+        
+    Returns:
+        List of heatmap analytics
+    """
+    try:
+        data = get_heatmap_analytics(days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting heatmap analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/latest")
+async def get_latest_update_endpoint():
+    """
+    Get the timestamp of the latest analytics update
     
-    return charts_info
+    Returns:
+        Latest update timestamp
+    """
+    try:
+        timestamp = get_latest_update()
+        return {
+            "status": "success",
+            "latest_update": timestamp
+        }
+    except Exception as e:
+        logger.error(f"Error getting latest update: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/popular-questions")
+async def get_popular_questions_endpoint(days: int = 30, limit: int = 10):
+    """
+    Get most popular questions from Redis
+    
+    Args:
+        days: Number of days to look back (default: 30)
+        limit: Maximum number of results (default: 10)
+        
+    Returns:
+        List of popular questions sorted by frequency
+    """
+    try:
+        data = get_popular_questions(days=days, limit=limit)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days,
+            "limit": limit
+        }
+    except Exception as e:
+        logger.error(f"Error getting popular questions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/department")
+async def get_department_analytics_endpoint(days: int = 30):
+    """
+    Get department-specific analytics from Redis
+    
+    Args:
+        days: Number of days to look back (default: 30)
+        
+    Returns:
+        List of department analytics
+    """
+    try:
+        data = get_department_analytics(days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting department analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+## NEW ANALYTICS ENDPOINTS
+
+@router.get("/redis/student-year")
+async def get_student_year_analytics_endpoint(days: int = 30):
+    """
+    Get student year analytics from Redis
+    
+    Args:
+        days: Number of days to look back (default: 30)
+        
+    Returns:
+        List of student year analytics (years 1-6)
+    """
+    try:
+        data = get_student_year_analytics(days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting student year analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/popular-by-year")
+async def get_popular_by_year_endpoint(year: int = None, days: int = 30, limit: int = 10):
+    """
+    Get popular questions grouped by student year
+    
+    Args:
+        year: Specific year to filter (None = all years)
+        days: Number of days to look back (default: 30)
+        limit: Max questions per year (default: 10)
+        
+    Returns:
+        Dict with year as key and list of popular questions as value
+    """
+    try:
+        data = get_popular_questions_by_year(year=year, days=days, limit=limit)
+        return {
+            "status": "success",
+            "data": data,
+            "years": list(data.keys()),
+            "days": days,
+            "limit": limit
+        }
+    except Exception as e:
+        logger.error(f"Error getting popular by year: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/user-type")
+async def get_user_type_endpoint(days: int = 30):
+    """
+    Get user type distribution (% students vs % teachers)
+    
+    Args:
+        days: Number of days to look back (default: 30)
+        
+    Returns:
+        User type distribution with percentages
+    """
+    try:
+        data = get_user_type_distribution(days=days)
+        return {
+            "status": "success",
+            **data,
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting user type distribution: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/success-rate")
+async def get_success_rate_endpoint(days: int = 7):
+    """
+    Get success rate analytics
+    
+    Args:
+        days: Number of days to look back (default: 7)
+        
+    Returns:
+        Success rate statistics
+    """
+    try:
+        data = get_success_rate_analytics(days=days)
+        return {
+            "status": "success",
+            **data,
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting success rate: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/response-time")
+async def get_response_time_endpoint(days: int = 7):
+    """
+    Get response time analytics by user type
+    
+    Args:
+        days: Number of days to look back (default: 7)
+        
+    Returns:
+        Response time statistics (avg, median, p95)
+    """
+    try:
+        data = get_response_time_analytics(days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting response time analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/timeseries")
+async def get_timeseries_endpoint(granularity: str = "hour", days: int = 7):
+    """
+    Get time-series analytics
+    
+    Args:
+        granularity: 'minute', 'hour', or 'day' (default: 'hour')
+        days: Number of days to look back (default: 7)
+        
+    Returns:
+        Time-series data points
+    """
+    try:
+        if granularity not in ["minute", "hour", "day"]:
+            raise HTTPException(status_code=400, detail="granularity must be 'minute', 'hour', or 'day'")
+        
+        data = get_timeseries_analytics(granularity=granularity, days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "granularity": granularity,
+            "days": days
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting timeseries analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/hourly-heatmap")
+async def get_hourly_heatmap_endpoint(days: int = 7):
+    """
+    Get hourly heatmap data (queries by hour of day 0-23)
+    
+    Args:
+        days: Number of days to look back (default: 7)
+        
+    Returns:
+        Hourly heatmap data
+    """
+    try:
+        data = get_hourly_heatmap(days=days)
+        return {
+            "status": "success",
+            "data": data,
+            "count": len(data),
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting hourly heatmap: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/collections/stats")

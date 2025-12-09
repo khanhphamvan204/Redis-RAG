@@ -1,0 +1,115 @@
+version: "3.8"
+
+services:
+  # ============================================
+  # APACHE FLINK CLUSTER
+  # ============================================
+  # To run: docker-compose -f docker-compose.yml -f docker-compose.kafka.yml -f docker-compose.flink.yml up -d
+  # To stop: docker-compose -f docker-compose.flink.yml down
+
+  # Flink Job Manager (Cluster Coordinator)
+  flink-jobmanager:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: flink-jobmanager
+    hostname: flink-jobmanager
+    ports:
+      - "8081:8081" # Flink Web UI
+      - "6123:6123" # RPC
+    command: jobmanager
+    environment:
+      - "FLINK_PROPERTIES=jobmanager.rpc.address: flink-jobmanager"
+      - KAFKA_BROKER_URL=kafka:29092
+      - KAFKA_TOPIC_QUERIES=user-queries
+      - REDIS_HOST=redis-stack-db
+      - REDIS_PORT=6379
+      - REDIS_TTL=2592000
+    volumes:
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - flink-savepoints:/tmp/flink-savepoints
+      - ./flink/streaming_job.py:/opt/flink/jobs/streaming_job.py
+    networks:
+      - kafka-network
+    extra_hosts:
+      - "redis-stack-db:host-gateway"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # Flink Task Manager (Worker)
+  flink-taskmanager:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: flink-taskmanager
+    hostname: flink-taskmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+      - KAFKA_BROKER_URL=kafka:29092
+      - REDIS_HOST=redis-stack-db
+      - REDIS_PORT=6379
+    volumes:
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - flink-savepoints:/tmp/flink-savepoints
+    depends_on:
+      - flink-jobmanager
+    networks:
+      - kafka-network
+    extra_hosts:
+      - "redis-stack-db:host-gateway"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  # Flink Streaming Job Submitter
+  flink-job-submit:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: flink-job-submit
+    command: /opt/flink/entrypoint.sh
+    environment:
+      - KAFKA_BROKER_URL=kafka:29092
+      - KAFKA_TOPIC_QUERIES=user-queries
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=6379
+      - REDIS_TTL=2592000
+    volumes:
+      - ./flink/streaming_job.py:/opt/flink/jobs/streaming_job.py
+      - ./flink/entrypoint.sh:/opt/flink/entrypoint.sh
+      - flink-checkpoints:/tmp/flink-checkpoints
+    depends_on:
+      - flink-jobmanager
+      - flink-taskmanager
+    networks:
+      - kafka-network
+    extra_hosts:
+      - "redis-stack-db:host-gateway"
+    restart: "no" # Run once to submit job
+
+networks:
+  kafka-network:
+    external: true
+
+volumes:
+  flink-checkpoints:
+    driver: local
+  flink-savepoints:
+    driver: local

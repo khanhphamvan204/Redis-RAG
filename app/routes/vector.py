@@ -40,70 +40,125 @@ logger = logging.getLogger(__name__)
 # USER METADATA LOOKUP HELPER
 # ============================================
 
-def get_user_metadata_from_db(user_id: int) -> Dict[str, str]:
+def get_user_metadata_from_db(user_id: int) -> Dict[str, Any]:
     """
-    Lookup user metadata from MongoDB for query tracking
+    Lookup comprehensive user metadata from MongoDB for query tracking
     
     Args:
         user_id: User ID from JWT token
         
     Returns:
-        Dictionary with 'faculty' and 'year' fields
+        Dictionary with UserInfo fields:
+        - user_id: int
+        - user_type: str
+        - department_id: int | None
+        - code: str | None (student_code or teacher_code)
+        - years: int | None (calculated from enrollment_date or hire_date)
     """
     try:
         client = MongoClient(Config.DATABASE_URL, serverSelectionTimeoutMS=3000)
         db = client["faiss_db"]
         
-        # Fetch user document
+        # Fetch user document with all relevant fields
         user_doc = db.users.find_one(
             {"user_id": user_id},
-            {"_id": 0, "user_type": 1, "department_id": 1, "student_info": 1}
+            {
+                "_id": 0, 
+                "user_id": 1,
+                "user_type": 1, 
+                "department_id": 1, 
+                "student_info": 1,
+                "teacher_info": 1
+            }
         )
         
         if not user_doc:
             logger.warning(f"User {user_id} not found in database")
-            return {"faculty": "Unknown", "year": "Unknown"}
+            return {
+                "user_id": user_id,
+                "user_type": "Unknown",
+                "department_id": None,
+                "code": None,
+                "years": None
+            }
         
-        # Extract faculty from department
-        faculty = "Unknown"
-        year = "Unknown"
-        
+        user_type = user_doc.get("user_type", "Unknown")
         department_id = user_doc.get("department_id")
-        if department_id:
-            dept_doc = db.departments.find_one(
-                {"department_id": department_id},
-                {"_id": 0, "department_name": 1}
-            )
-            if dept_doc:
-                faculty = dept_doc.get("department_name", "Unknown")
+        code = None
+        years = None
         
-        # If faculty still unknown, use user_type as fallback
-        if faculty == "Unknown":
-            user_type = user_doc.get("user_type", "Unknown")
-            faculty = user_type  # e.g., "Giáo viên", "Sinh viên"
+        # Calculate years based on user type
+        current_year = datetime.now().year
+        current_month = datetime.now().month
         
-        # Extract year from student_info if available
-        student_info = user_doc.get("student_info", {})
-        if student_info and isinstance(student_info, dict):
-            # Try to extract year from enrollment_date or other fields
-            enrollment_date = student_info.get("enrollment_date")
-            if enrollment_date:
-                try:
-                    # Extract year from date string (e.g., "2024-09-01" -> "2024")
-                    year = enrollment_date[:4]
-                except:
-                    pass
+        if user_type == "Học sinh" or user_type == "Sinh viên":
+            # Student: calculate student year from enrollment_date
+            student_info = user_doc.get("student_info", {})
+            if student_info and isinstance(student_info, dict):
+                code = student_info.get("student_code")
+                enrollment_date = student_info.get("enrollment_date")
+                
+                if enrollment_date:
+                    try:
+                        # Parse enrollment date (format: "YYYY-MM-DD")
+                        enrollment_year = int(enrollment_date[:4])
+                        enrollment_month = int(enrollment_date[5:7])
+                        
+                        # Calculate academic year
+                        # If before September, subtract 1 from difference
+                        years_diff = current_year - enrollment_year
+                        if current_month < 9:  # Before September
+                            years_diff -= 1
+                        if enrollment_month >= 9:  # Enrolled in Sept or later
+                            years_diff += 1
+                        
+                        years = max(1, min(years_diff, 6))  # Clamp to 1-6
+                        
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Failed to parse enrollment_date '{enrollment_date}': {e}")
         
-        # If no year found, use department_id as fallback
-        if year == "Unknown" and department_id:
-            year = str(department_id)
+        elif user_type == "Giáo viên":
+            # Teacher: calculate teaching years from hire_date
+            teacher_info = user_doc.get("teacher_info", {})
+            if teacher_info and isinstance(teacher_info, dict):
+                code = teacher_info.get("teacher_code")
+                hire_date = teacher_info.get("hire_date")
+                
+                if hire_date:
+                    try:
+                        # Parse hire date (format: "YYYY-MM-DD")
+                        hire_year = int(hire_date[:4])
+                        hire_month = int(hire_date[5:7])
+                        
+                        # Calculate years of service
+                        years = current_year - hire_year
+                        if current_month < hire_month:
+                            years -= 1
+                        
+                        years = max(0, years)  # At least 0
+                        
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Failed to parse hire_date '{hire_date}': {e}")
         
         client.close()
-        return {"faculty": faculty, "year": year}
+        
+        return {
+            "user_id": user_id,
+            "user_type": user_type,
+            "department_id": department_id,
+            "code": code,
+            "years": years
+        }
         
     except Exception as e:
         logger.error(f"Failed to fetch user metadata: {e}")
-        return {"faculty": "Unknown", "year": "Unknown"}
+        return {
+            "user_id": user_id,
+            "user_type": "Unknown",
+            "department_id": None,
+            "code": None,
+            "years": None
+        }
 
 
 class AddVectorRequest(BaseModel):
@@ -1282,27 +1337,27 @@ Hãy trả lời câu hỏi dựa trên ngữ cảnh trên với format Markdown
             # Extract user_id from JWT token
             user_id_int = current_user.get("user_id")
             
-            # Lookup user metadata from MongoDB (faculty, year)
-            user_metadata = get_user_metadata_from_db(user_id_int)
-            faculty = user_metadata.get("faculty", "Unknown")
-            year = user_metadata.get("year", "Unknown")
+            # Lookup comprehensive user metadata from MongoDB
+            user_info = get_user_metadata_from_db(user_id_int)
             
-            logger.info(f"Query tracking metadata - User: {user_id}, Faculty: {faculty}, Year: {year}")
+            logger.info(f"Query tracking metadata - "
+                       f"User: {user_info.get('user_type')} | "
+                       f"Code: {user_info.get('code')} | "
+                       f"Years: {user_info.get('years')}")
             
             # Log query to MongoDB (async, non-blocking)
             tracker = get_query_tracker()
             query_id = await tracker.log_query(
-                user_id=user_id,
+                user_info=user_info,
                 session_id=session_id,
                 query_text=original_query,
-                faculty=faculty,
-                year=year,
-                file_type=request.file_type,
-                response_time_ms=response_time_ms,
-                contexts_found=len(top_results),
+                rewritten_query=rewritten_query if query_rewritten else None,
                 k=request.k,
                 similarity_threshold=request.similarity_threshold,
-                rewritten_query=rewritten_query if query_rewritten else None,
+                context_found=len(top_results),
+                response_time_ms=response_time_ms,
+                llm_response=llm_response,
+                model_used="gemini-2.5-flash",
                 query_rewritten=query_rewritten,
                 history_used=history_used,
                 history_count=history_count

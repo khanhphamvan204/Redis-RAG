@@ -19,7 +19,8 @@ from app.services.redis_analytics_service import (
     get_heatmap_analytics,
     get_latest_update,
     get_popular_questions,
-    get_department_analytics,
+    get_department_name_analytics,
+    get_overall_summary,
     # NEW FUNCTIONS
     get_student_year_analytics,
     get_popular_questions_by_year,
@@ -183,24 +184,50 @@ async def get_popular_questions_endpoint(days: int = 30, limit: int = 10):
 @router.get("/redis/department")
 async def get_department_analytics_endpoint(days: int = 30):
     """
-    Get department-specific analytics from Redis
+    Get department analytics from Redis for pie chart
     
     Args:
         days: Number of days to look back (default: 30)
         
     Returns:
-        List of department analytics
+        List of department analytics with percentage
     """
     try:
-        data = get_department_analytics(days=days)
+        data = get_department_name_analytics(days=days)
+        total_queries = sum(d.get("query_count", 0) for d in data)
         return {
             "status": "success",
             "data": data,
             "count": len(data),
-            "days": days
+            "total_queries": total_queries,
+            "days": days,
+            "chart_type": "pie"
         }
     except Exception as e:
         logger.error(f"Error getting department analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/redis/overall-summary")
+async def get_overall_summary_endpoint(days: int = 30):
+    """
+    Get overall summary statistics for dashboard cards
+    
+    Args:
+        days: Number of days to look back (default: 30)
+        
+    Returns:
+        Dict with total_queries, success_count, success_rate, avg_response_time
+    """
+    try:
+        data = get_overall_summary(days=days)
+        return {
+            "status": "success",
+            **data,
+            "days": days
+        }
+    except Exception as e:
+        logger.error(f"Error getting overall summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -18,6 +18,7 @@ class UserInfo(BaseModel):
     user_id: int = Field(..., description="User ID from database")
     user_type: str = Field(default="Unknown", description="User type (e.g., 'Học sinh', 'Giáo viên')")
     department_id: Optional[int] = Field(None, description="Department ID")
+    department_name: Optional[str] = Field(None, description="Department name for easier analytics")
     code: Optional[str] = Field(None, description="Student code or Teacher code (e.g., 'K21.YDUOC.001' or 'T.NNA.103')")
     years: Optional[int] = Field(None, description="Student year (1-5) or Teaching years, calculated from enrollment_date or hire_date")
 
@@ -73,6 +74,7 @@ class QueryLog(BaseModel):
                     "user_id": 1005,
                     "user_type": "Học sinh",
                     "department_id": 104,
+                    "department_name": "Khoa Công nghệ Thông tin",
                     "code": "K21.YDUOC.001",
                     "years": 4
                 },

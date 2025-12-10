@@ -65,6 +65,7 @@ class ParseQueryEvent(MapFunction):
                 'user_id': user.get('user_id'),
                 'user_type': user.get('user_type'),
                 'department_id': user.get('department_id'),
+                'department_name': user.get('department_name'),  # Added for department analytics
                 'user_code': user.get('code'),
                 'user_years': user.get('years'),
                 'session_id': data.get('session_id'),
@@ -88,8 +89,47 @@ class ParseQueryEvent(MapFunction):
             return None
 
 
-class FacultyAggregator(ProcessWindowFunction):
-    """Aggregate queries by faculty"""
+class DepartmentAggregator(ProcessWindowFunction):
+    """Aggregate queries by department name for pie chart"""
+    
+    def process(self, key, context, elements):
+        elements_list = list(elements)
+        
+        if not elements_list:
+            return
+        
+        user_ids = set()
+        response_times = []
+        success_count = 0
+        
+        for elem in elements_list:
+            if elem is None:
+                continue
+            user_ids.add(elem.get('user_id'))
+            
+            rt = elem.get('rag_response_time_ms')
+            if rt is not None:
+                response_times.append(rt)
+            
+            if elem.get('rag_success'):
+                success_count += 1
+        
+        result = {
+            'department_name': key,
+            'window_start': datetime.fromtimestamp(context.window().start / 1000).isoformat(),
+            'window_end': datetime.fromtimestamp(context.window().end / 1000).isoformat(),
+            'query_count': len(elements_list),
+            'unique_users': len(user_ids),
+            'success_count': success_count,
+            'avg_response_time': sum(response_times) / len(response_times) if response_times else 0,
+            'analytics_type': 'department'
+        }
+        
+        yield result
+
+
+class YearAggregator(ProcessWindowFunction):
+    """Aggregate queries by student year"""
     
     def process(self, key, context, elements):
         elements_list = list(elements)
@@ -100,8 +140,6 @@ class FacultyAggregator(ProcessWindowFunction):
         user_ids = set()
         response_times = []
         contexts_found = []
-        rewritten_count = 0
-        history_used_count = 0
         
         for elem in elements_list:
             if elem is None:
@@ -115,24 +153,128 @@ class FacultyAggregator(ProcessWindowFunction):
             cf = elem.get('rag_context_found')
             if cf is not None:
                 contexts_found.append(cf)
-            
-            if elem.get('metadata_query_rewritten'):
-                rewritten_count += 1
-            
-            if elem.get('metadata_history_used'):
-                history_used_count += 1
         
         result = {
-            'faculty': key,
+            'year': key,
             'window_start': datetime.fromtimestamp(context.window().start / 1000).isoformat(),
             'window_end': datetime.fromtimestamp(context.window().end / 1000).isoformat(),
             'query_count': len(elements_list),
             'unique_users': len(user_ids),
             'avg_response_time': sum(response_times) / len(response_times) if response_times else 0,
             'avg_contexts_found': sum(contexts_found) / len(contexts_found) if contexts_found else 0,
-            'rewritten_queries': rewritten_count,
-            'history_used_count': history_used_count,
-            'analytics_type': 'faculty'
+            'analytics_type': 'student_year'
+        }
+        
+        yield result
+
+
+class PopularQuestionsAggregator(ProcessWindowFunction):
+    """Aggregate popular questions across all users"""
+    
+    def process(self, key, context, elements):
+        elements_list = list(elements)
+        
+        if not elements_list:
+            return
+        
+        user_ids = set()
+        query_text = None
+        
+        for elem in elements_list:
+            if elem is None:
+                continue
+            user_ids.add(elem.get('user_id'))
+            if query_text is None:
+                query_text = elem.get('query_text', '')
+        
+        result = {
+            'query_hash': key,
+            'query_text': query_text,
+            'window_start': datetime.fromtimestamp(context.window().start / 1000).isoformat(),
+            'window_end': datetime.fromtimestamp(context.window().end / 1000).isoformat(),
+            'query_count': len(elements_list),
+            'unique_users': len(user_ids),
+            'analytics_type': 'popular_queries'
+        }
+        
+        yield result
+
+
+class PopularQuestionsByYearAggregator(ProcessWindowFunction):
+    """Aggregate popular questions grouped by student year for heatmap"""
+    
+    def process(self, key, context, elements):
+        elements_list = list(elements)
+        
+        if not elements_list:
+            return
+        
+        # key is tuple: (year, query_hash)
+        year, query_hash = key
+        
+        user_ids = set()
+        query_text = None
+        
+        for elem in elements_list:
+            if elem is None:
+                continue
+            user_ids.add(elem.get('user_id'))
+            if query_text is None:
+                query_text = elem.get('query_text', '')
+        
+        result = {
+            'year': year,
+            'query_hash': query_hash,
+            'query_text': query_text,
+            'window_start': datetime.fromtimestamp(context.window().start / 1000).isoformat(),
+            'window_end': datetime.fromtimestamp(context.window().end / 1000).isoformat(),
+            'query_count': len(elements_list),
+            'unique_users': len(user_ids),
+            'analytics_type': 'popular_by_year'
+        }
+        
+        yield result
+
+
+class OverallSummaryAggregator(ProcessWindowFunction):
+    """Aggregate overall analytics summary for dashboard cards"""
+    
+    def process(self, key, context, elements):
+        elements_list = list(elements)
+        
+        if not elements_list:
+            return
+        
+        user_ids = set()
+        response_times = []
+        success_count = 0
+        
+        for elem in elements_list:
+            if elem is None:
+                continue
+            user_ids.add(elem.get('user_id'))
+            
+            rt = elem.get('rag_response_time_ms')
+            if rt is not None:
+                response_times.append(rt)
+            
+            if elem.get('rag_success'):
+                success_count += 1
+        
+        total_queries = len(elements_list)
+        failure_count = total_queries - success_count
+        success_rate = round((success_count / total_queries * 100), 2) if total_queries > 0 else 0
+        
+        result = {
+            'window_start': datetime.fromtimestamp(context.window().start / 1000).isoformat(),
+            'window_end': datetime.fromtimestamp(context.window().end / 1000).isoformat(),
+            'total_queries': total_queries,
+            'success_count': success_count,
+            'failure_count': failure_count,
+            'success_rate': success_rate,
+            'unique_users': len(user_ids),
+            'avg_response_time': round(sum(response_times) / len(response_times), 2) if response_times else 0,
+            'analytics_type': 'overall'
         }
         
         yield result
@@ -147,17 +289,22 @@ class RedisWriter(MapFunction):
             timestamp = datetime.now().isoformat()
             analytics_type = value.pop('analytics_type', 'unknown')
             
-            # Create Redis key
-            if analytics_type == 'faculty':
-                faculty = value.get('faculty', 'unknown')
-                key = f"analytics:faculty:{faculty}:{timestamp}"
-            elif analytics_type == 'year':
+            # Create Redis key based on analytics type
+            if analytics_type == 'department':
+                dept = value.get('department_name', 'unknown')
+                key = f"analytics:department:{dept}:{timestamp}"
+            elif analytics_type == 'student_year':
                 year = value.get('year', 'unknown')
-                key = f"analytics:year:{year}:{timestamp}"
-            elif analytics_type == 'heatmap':
-                faculty = value.get('faculty', 'unknown')
+                key = f"analytics:student_year:{year}:{timestamp}"
+            elif analytics_type == 'popular_queries':
+                query_hash = value.get('query_hash', 'unknown')
+                key = f"analytics:popular_queries:{query_hash}:{timestamp}"
+            elif analytics_type == 'popular_by_year':
                 year = value.get('year', 'unknown')
-                key = f"analytics:heatmap:{faculty}:{year}:{timestamp}"
+                query_hash = value.get('query_hash', 'unknown')
+                key = f"analytics:popular_by_year:{year}:{query_hash}:{timestamp}"
+            elif analytics_type == 'overall':
+                key = f"analytics:overall:{timestamp}"
             else:
                 key = f"analytics:{analytics_type}:{timestamp}"
             
@@ -222,18 +369,77 @@ def main():
     valid_stream = parsed_stream.filter(lambda x: x is not None)
     
     # ========================================
-    # AGGREGATION 1: Faculty Analytics (20-second window)
+    # AGGREGATION 1: Department Analytics (20-second window) - For Pie Chart
     # ========================================
-    logger.info("Setting up Faculty Analytics...")
+    logger.info("Setting up Department Analytics (Pie Chart)...")
     
-    faculty_stream = valid_stream \
-        .filter(lambda x: x.get('user_type') is not None) \
-        .key_by(lambda x: x.get('user_type')) \
+    department_stream = valid_stream \
+        .filter(lambda x: x.get('department_name') is not None) \
+        .key_by(lambda x: x.get('department_name')) \
         .window(TumblingProcessingTimeWindows.of(Time.seconds(20))) \
-        .process(FacultyAggregator()) \
+        .process(DepartmentAggregator()) \
         .map(RedisWriter())
     
-    faculty_stream.print()
+    department_stream.print()
+    
+    # ========================================
+    # AGGREGATION 2: Student Year Analytics (20-second window) - For Bar Chart
+    # ========================================
+    logger.info("Setting up Student Year Analytics (Bar Chart)...")
+    
+    year_stream = valid_stream \
+        .filter(lambda x: x.get('user_years') is not None) \
+        .key_by(lambda x: str(x.get('user_years'))) \
+        .window(TumblingProcessingTimeWindows.of(Time.seconds(20))) \
+        .process(YearAggregator()) \
+        .map(RedisWriter())
+    
+    year_stream.print()
+    
+    # ========================================
+    # AGGREGATION 3: Popular Questions (20-second window) - For Table/List
+    # ========================================
+    logger.info("Setting up Popular Questions Analytics...")
+    
+    popular_stream = valid_stream \
+        .filter(lambda x: x.get('query_text')) \
+        .key_by(lambda x: hashlib.md5(x.get('query_text', '').encode()).hexdigest()[:8]) \
+        .window(TumblingProcessingTimeWindows.of(Time.seconds(20))) \
+        .process(PopularQuestionsAggregator()) \
+        .map(RedisWriter())
+    
+    popular_stream.print()
+    
+    # ========================================
+    # AGGREGATION 3.5: Popular Questions by Year (20-second window) - For Heatmap
+    # ========================================
+    logger.info("Setting up Popular Questions by Year Analytics (Heatmap)...")
+    
+    popular_by_year_stream = valid_stream \
+        .filter(lambda x: x.get('user_years') is not None and x.get('query_text')) \
+        .key_by(lambda x: (
+            str(x.get('user_years')), 
+            hashlib.md5(x.get('query_text', '').encode()).hexdigest()[:8]
+        )) \
+        .window(TumblingProcessingTimeWindows.of(Time.seconds(20))) \
+        .process(PopularQuestionsByYearAggregator()) \
+        .map(RedisWriter())
+    
+    popular_by_year_stream.print()
+
+    
+    # ========================================
+    # AGGREGATION 4: Overall Summary (20-second window) - For Dashboard Cards
+    # ========================================
+    logger.info("Setting up Overall Summary Analytics (Dashboard Cards)...")
+    
+    overall_stream = valid_stream \
+        .key_by(lambda x: "all") \
+        .window(TumblingProcessingTimeWindows.of(Time.seconds(20))) \
+        .process(OverallSummaryAggregator()) \
+        .map(RedisWriter())
+    
+    overall_stream.print()
     
     # Execute
     logger.info("=" * 80)

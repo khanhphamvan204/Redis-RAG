@@ -52,6 +52,7 @@ def get_user_metadata_from_db(user_id: int) -> Dict[str, Any]:
         - user_id: int
         - user_type: str
         - department_id: int | None
+        - department_name: str | None
         - code: str | None (student_code or teacher_code)
         - years: int | None (calculated from enrollment_date or hire_date)
     """
@@ -78,14 +79,27 @@ def get_user_metadata_from_db(user_id: int) -> Dict[str, Any]:
                 "user_id": user_id,
                 "user_type": "Unknown",
                 "department_id": None,
+                "department_name": None,
                 "code": None,
                 "years": None
             }
         
         user_type = user_doc.get("user_type", "Unknown")
         department_id = user_doc.get("department_id")
+        department_name = None
         code = None
         years = None
+        
+        # Lookup department_name from departments collection
+        if department_id is not None:
+            dept_doc = db.departments.find_one(
+                {"department_id": department_id},
+                {"_id": 0, "department_name": 1}
+            )
+            if dept_doc:
+                department_name = dept_doc.get("department_name")
+            else:
+                logger.warning(f"Department {department_id} not found in departments collection")
         
         # Calculate years based on user type
         current_year = datetime.now().year
@@ -146,6 +160,7 @@ def get_user_metadata_from_db(user_id: int) -> Dict[str, Any]:
             "user_id": user_id,
             "user_type": user_type,
             "department_id": department_id,
+            "department_name": department_name,
             "code": code,
             "years": years
         }
@@ -156,9 +171,11 @@ def get_user_metadata_from_db(user_id: int) -> Dict[str, Any]:
             "user_id": user_id,
             "user_type": "Unknown",
             "department_id": None,
+            "department_name": None,
             "code": None,
             "years": None
         }
+
 
 
 class AddVectorRequest(BaseModel):

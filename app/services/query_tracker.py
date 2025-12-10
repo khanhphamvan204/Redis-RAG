@@ -50,6 +50,7 @@ class QueryTracker:
                 ("user.user_type", ASCENDING),
                 ("user.years", ASCENDING),
                 ("user.department_id", ASCENDING),
+                ("user.department_name", ASCENDING),
                 ("session_id", ASCENDING),
             ]
             
@@ -135,6 +136,7 @@ class QueryTracker:
             user_id=user_info.get("user_id"),
             user_type=user_info.get("user_type", "Unknown"),
             department_id=user_info.get("department_id"),
+            department_name=user_info.get("department_name"),
             code=user_info.get("code"),
             years=user_info.get("years")
         )

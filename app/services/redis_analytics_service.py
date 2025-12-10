@@ -250,35 +250,44 @@ def get_popular_questions(days: int = 30, limit: int = 10) -> List[Dict]:
         return []
 
 
-def get_department_analytics(days: int = 30) -> List[Dict]:
-    """Get department analytics from Redis"""
+def get_department_name_analytics(days: int = 30) -> List[Dict]:
+    """
+    Get department analytics from Redis for pie chart
+    Uses department_name as key
+    """
     try:
         keys = _scan_keys_by_pattern("analytics:department:*")
         logger.info(f"Found {len(keys)} department analytics keys")
         
         def aggregator(agg_data, parts, data, timestamp_str):
-            dept_id = parts[2]
-            if dept_id not in agg_data:
-                agg_data[dept_id] = {
-                    "department_id": int(dept_id) if dept_id.isdigit() else dept_id,
+            dept_name = parts[2]
+            if dept_name not in agg_data:
+                agg_data[dept_name] = {
+                    "department_name": dept_name,
                     "query_count": 0,
                     "unique_users": 0,
+                    "success_count": 0,
                     "total_response_time": 0,
                     "count": 0
                 }
             
-            agg_data[dept_id]["query_count"] += data.get("query_count", 0)
-            agg_data[dept_id]["unique_users"] += data.get("unique_users", 0)
-            agg_data[dept_id]["total_response_time"] += data.get("avg_response_time", 0) * data.get("query_count", 1)
-            agg_data[dept_id]["count"] += data.get("query_count", 1)
+            agg_data[dept_name]["query_count"] += data.get("query_count", 0)
+            agg_data[dept_name]["unique_users"] += data.get("unique_users", 0)
+            agg_data[dept_name]["success_count"] += data.get("success_count", 0)
+            agg_data[dept_name]["total_response_time"] += data.get("avg_response_time", 0) * data.get("query_count", 1)
+            agg_data[dept_name]["count"] += data.get("query_count", 1)
         
         dept_data = _filter_by_time_and_aggregate(keys, days, 4, aggregator)
         
-        # Calculate averages
+        # Calculate totals for percentage
+        total_queries = sum(d["query_count"] for d in dept_data.values())
+        
+        # Calculate averages and percentages
         result = []
-        for dept_id, data in dept_data.items():
+        for dept_name, data in dept_data.items():
             if data["count"] > 0:
-                data["avg_response_time"] = data["total_response_time"] / data["count"]
+                data["avg_response_time"] = round(data["total_response_time"] / data["count"], 2)
+                data["percentage"] = round((data["query_count"] / total_queries * 100), 2) if total_queries > 0 else 0
             del data["total_response_time"]
             del data["count"]
             result.append(data)
@@ -306,7 +315,79 @@ def subscribe_to_updates():
         return None
 
 
+
 ## NEW ANALYTICS FUNCTIONS
+
+def get_overall_summary(days: int = 30) -> Dict:
+    """
+    Get overall summary statistics for dashboard cards
+    
+    Args:
+        days: Number of days to look back
+        
+    Returns:
+        Dict with total_queries, success_count, failure_count, success_rate, avg_response_time
+    """
+    try:
+        keys = _scan_keys_by_pattern("analytics:overall:*")
+        logger.info(f"Found {len(keys)} overall summary keys")
+        
+        total_queries = 0
+        success_count = 0
+        failure_count = 0
+        unique_users = set()
+        response_times = []
+        
+        cutoff_time = datetime.now() - timedelta(days=days)
+        
+        for key in keys:
+            try:
+                parts = key.split(":")
+                if len(parts) >= 3:
+                    timestamp_str = ":".join(parts[2:])
+                    timestamp = datetime.fromisoformat(timestamp_str)
+                    
+                    if timestamp >= cutoff_time:
+                        data_json = redis_client.get(key)
+                        if data_json:
+                            data = json.loads(data_json)
+                            total_queries += data.get("total_queries", 0)
+                            success_count += data.get("success_count", 0)
+                            failure_count += data.get("failure_count", 0)
+                            
+                            avg_rt = data.get("avg_response_time", 0)
+                            count = data.get("total_queries", 1)
+                            if avg_rt > 0:
+                                response_times.extend([avg_rt] * count)
+            except Exception as e:
+                logger.warning(f"Error processing key {key}: {e}")
+                continue
+        
+        # Calculate success rate
+        success_rate = round((success_count / total_queries * 100), 2) if total_queries > 0 else 0
+        avg_response_time = round(sum(response_times) / len(response_times), 2) if response_times else 0
+        
+        result = {
+            "total_queries": total_queries,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "success_rate": success_rate,
+            "avg_response_time": avg_response_time
+        }
+        
+        logger.info(f"Returning overall summary: {total_queries} queries, {success_rate}% success rate")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting overall summary: {e}", exc_info=True)
+        return {
+            "total_queries": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "success_rate": 0,
+            "avg_response_time": 0
+        }
+
 
 def get_student_year_analytics(days: int = 30) -> List[Dict]:
     """
@@ -381,19 +462,34 @@ def get_popular_questions_by_year(year: Optional[int] = None, days: int = 30, li
         keys = _scan_keys_by_pattern(pattern)
         logger.info(f"Found {len(keys)} popular by year keys")
         
+        # Use cutoff_time to filter
+        cutoff_time = datetime.now() - timedelta(days=days)
+        
         # Group by year
         by_year = defaultdict(lambda: defaultdict(lambda: {"query_text": "", "total_count": 0, "unique_users": 0}))
         
-        def aggregator(agg_data, parts, data, timestamp_str):
-            years = parts[2]
-            query_hash = parts[3]
-            query_text = data.get("query_text", "")
-            
-            by_year[years][query_hash]["query_text"] = query_text
-            by_year[years][query_hash]["total_count"] += data.get("query_count", 0)
-            by_year[years][query_hash]["unique_users"] += data.get("unique_users", 0)
-        
-        _ = _filter_by_time_and_aggregate(keys, days, 5, aggregator)
+        for key in keys:
+            try:
+                parts = key.split(":")
+                if len(parts) >= 5:
+                    # parts: [analytics, popular_by_year, year, query_hash, timestamp]
+                    timestamp_str = parts[4]
+                    timestamp = datetime.fromisoformat(timestamp_str)
+                    
+                    if timestamp >= cutoff_time:
+                        data_json = redis_client.get(key)
+                        if data_json:
+                            data = json.loads(data_json)
+                            years = parts[2]
+                            query_hash = parts[3]
+                            query_text = data.get("query_text", "")
+                            
+                            by_year[years][query_hash]["query_text"] = query_text
+                            by_year[years][query_hash]["total_count"] += data.get("query_count", 0)
+                            by_year[years][query_hash]["unique_users"] += data.get("unique_users", 0)
+            except Exception as e:
+                logger.warning(f"Error processing key {key}: {e}")
+                continue
         
         # Sort and limit each year
         result = {}

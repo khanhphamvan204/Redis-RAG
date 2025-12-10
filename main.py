@@ -74,11 +74,12 @@ app.add_middleware(
 )
 
 # Configure environment
-try:
-    os.environ["GOOGLE_API_KEY"] = Config.GEMINI_API_KEY    
-except AttributeError as e:
-    logger.error(f"Config error: {str(e)}")
-    raise Exception("Configuration error: Missing GEMINI_API_KEY")
+if Config.GEMINI_API_KEY:
+    os.environ["GOOGLE_API_KEY"] = Config.GEMINI_API_KEY
+    logger.info("Gemini API key configured")
+else:
+    logger.warning("GEMINI_API_KEY not set in .env - LLM features will not work")
+
 
 # Include routes
 app.include_router(health.router, prefix="/health")

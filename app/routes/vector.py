@@ -997,40 +997,26 @@ class ContextBuilder:
     """Xây dựng context thông minh cho LLM"""
     
     @staticmethod
-    def build_document_context(results: List[Dict], max_tokens: int = 5000) -> str:
+    def build_document_context(results: List[Dict], max_tokens: int = None) -> str:
         """
-        Tạo context từ documents với giới hạn tokens
+        Tạo context từ documents (không giới hạn)
         
         Args:
             results: List documents từ vector search
-            max_tokens: Giới hạn tokens (tính sơ bộ: ~0.75 token/char tiếng Việt)
+            max_tokens: Deprecated - không sử dụng nữa
         """
         if not results:
             return "Không có tài liệu liên quan."
         
         context_parts = []
-        estimated_tokens = 0
-        max_chars = int(max_tokens * 1.3)  # ~0.75 token/char
         
         for i, result in enumerate(results, 1):
             content = result['content']
             filename = result['metadata']['filename']
             
-            # Format document snippet
+            # Format document snippet (không cắt content)
             doc_snippet = f"**Tài liệu {i}: {filename}**\n{content}\n"
-            
-            # Kiểm tra giới hạn
-            if estimated_tokens + len(doc_snippet) > max_chars:
-                # Cắt bớt content
-                remaining_chars = max_chars - estimated_tokens - 100
-                if remaining_chars > 200:
-                    content_truncated = content[:remaining_chars] + "..."
-                    doc_snippet = f"**Tài liệu {i}: {filename}**\n{content_truncated}\n"
-                    context_parts.append(doc_snippet)
-                break
-            
             context_parts.append(doc_snippet)
-            estimated_tokens += len(doc_snippet)
         
         return "\n".join(context_parts)
     
@@ -1038,10 +1024,10 @@ class ContextBuilder:
     def build_history_context(
         history: SemanticMessageHistory,
         current_query: str,
-        max_messages: int = 4
+        max_messages: int = 3
     ) -> tuple[str, int]:
         """
-        Lấy lịch sử chat liên quan (semantic search)
+        Lấy lịch sử chat liên quan (semantic search) - không giới hạn content
         
         Returns:
             (context_string, số_messages_sử_dụng)
@@ -1057,11 +1043,11 @@ class ContextBuilder:
             if not relevant_msgs:
                 return "", 0
             
-            # Format lịch sử
+            # Format lịch sử (không cắt content)
             history_parts = ["**Lịch sử chat liên quan:**"]
-            for msg in relevant_msgs[-max_messages:]:  # Lấy tối đa max_messages
+            for msg in relevant_msgs[-max_messages:]:
                 role = "Bạn" if msg.get('role') == 'user' else "AI"
-                content = msg.get('content', '')[:300]  # Giới hạn mỗi message
+                content = msg.get('content', '')  # Bỏ giới hạn [:300]
                 history_parts.append(f"{role}: {content}")
             
             return "\n".join(history_parts), len(relevant_msgs)
@@ -1105,56 +1091,64 @@ async def search_with_llm_context(
             logger.info(f"Tiếp tục session: {session_id}")
         
         # ========================================
-        # 2. QUERY REWRITING 
+        # 2. QUERY REWRITING & HISTORY MANAGEMENT
         # ========================================
         query_rewritten = False
         rewritten_query = original_query
+        history = None  # Initialize history variable
+        history_context = ""
+        history_count = 0
         
         if not request.disable_query_rewrite:
             try:
-                # Lấy lịch sử để rewrite
+                # Lấy lịch sử 1 LẦN DUY NHẤT - dùng cho cả rewriting và LLM context
                 history = get_session_history(session_id)
+                logger.info("Đã lấy history (sẽ dùng cho rewriting + LLM context)")
                 
                 # FIXED: Dùng API của SemanticMessageHistory để lấy messages
                 try:
-                    # Lấy tất cả messages từ session (đã sắp xếp theo thời gian)
-                    all_messages = history.get_recent(top_k=6, as_text=False)
+                    # Chỉ lấy 3 câu hỏi gần nhất (role='user') để giảm context
+                    all_messages = history.get_recent(top_k=10, as_text=False)  # Lấy 10 để filter ra 3 user messages
                     
-                    # DEBUG: Xem cấu trúc data
-                    if all_messages and len(all_messages) > 0:
-                        logger.debug(f"Message structure sample: {type(all_messages[0])}")
-                        logger.debug(f"Message content: {all_messages[0]}")
-                    
-                    # Convert sang format cần thiết
+                    # Convert và chỉ giữ lại user messages
                     history_messages = []
                     for msg in all_messages:
                         try:
+                            role = None
+                            content = None
+                            
                             # Case 1: Dict format
                             if isinstance(msg, dict):
-                                history_messages.append({
-                                    'role': msg.get('role', 'user'),
-                                    'content': msg.get('content', '')
-                                })
+                                role = msg.get('role', 'user')
+                                content = msg.get('content', '')
                             # Case 2: LangChain BaseMessage
                             elif hasattr(msg, 'type') and hasattr(msg, 'content'):
                                 role = 'user' if msg.type == 'human' else 'assistant'
-                                history_messages.append({
-                                    'role': role,
-                                    'content': msg.content
-                                })
+                                content = msg.content
                             # Case 3: String (fallback)
                             elif isinstance(msg, str):
-                                history_messages.append({
-                                    'role': 'user',
-                                    'content': msg
-                                })
+                                role = 'user'
+                                content = msg
                             else:
                                 logger.warning(f"Unknown message type: {type(msg)}")
+                                continue
+                            
+                            # Chỉ lấy user messages (câu hỏi)
+                            if role == 'user' and content:
+                                history_messages.append({
+                                    'role': 'user',
+                                    'content': content
+                                })
+                                
+                                # Dừng khi đủ 3 câu hỏi
+                                if len(history_messages) >= 3:
+                                    break
+                                    
                         except Exception as parse_error:
                             logger.warning(f"Không parse được message: {parse_error}")
                             continue
                     
-                    logger.info(f"  Lấy được {len(history_messages)} messages cho rewriting")
+                    logger.info(f"  Lấy được {len(history_messages)} câu hỏi cho rewriting")
                     
                 except Exception as e:
                     logger.warning(f"Không lấy được history: {e}")
@@ -1169,7 +1163,7 @@ async def search_with_llm_context(
                     )
                     
                     if query_rewritten:
-                        logger.info(f" Query rewriting:")
+                        logger.info(f"   Query rewriting:")
                         logger.info(f"   Original: {original_query}")
                         logger.info(f"   Rewritten: {rewritten_query}")
                 else:
@@ -1180,7 +1174,7 @@ async def search_with_llm_context(
                 rewritten_query = original_query
                 query_rewritten = False
         else:
-            logger.info("Query rewriting bị tắt")
+            logger.info("Query rewriting bị tắt → BỎ QUA history context")
         
         # ========================================
         # 3. VECTOR SEARCH (dùng rewritten query!)
@@ -1216,7 +1210,8 @@ async def search_with_llm_context(
                 "uploaded_by", "role_user", "role_subject",
                 "created_at", "url"
             ],
-            num_results=request.k * 2
+            # num_results=request.k * 2
+            num_results=request.k
         )
         results = index.query(vector_query)
         
@@ -1263,13 +1258,16 @@ async def search_with_llm_context(
         # Document context
         doc_context = builder.build_document_context(top_results, max_tokens=3000)
         
-        # History context (semantic search)
-        history = get_session_history(session_id)
-        history_context, history_count = builder.build_history_context(
-            history,
-            rewritten_query,  # Dùng rewritten query cho semantic search
-            max_messages=3
-        )
+        # History context - CHỈ KHI có history (query rewrite enabled)
+        if history is not None:
+            history_context, history_count = builder.build_history_context(
+                history,
+                rewritten_query,  # Dùng rewritten query cho semantic search
+                max_messages=3
+            )
+            logger.info(f"Đã build history context: {history_count} messages")
+        else:
+            logger.info("Bỏ qua history context (query rewrite disabled)")
         
         history_used = history_count > 0
         
@@ -1286,6 +1284,9 @@ async def search_with_llm_context(
         
         if top_results or history_used:
             try:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                from langchain.prompts import PromptTemplate
+                
                 llm = ChatGoogleGenerativeAI(
                     model="gemini-2.5-flash",
                     temperature=0.3
@@ -1296,7 +1297,7 @@ async def search_with_llm_context(
                     template="""Bạn là trợ lý AI chuyên nghiệp.
 
 **Nguyên tắc:**
-- Chỉ trả lời dựa trên ngữ cảnh bên dưới
+- Chỉ trả lời dựa trên ngữ cảnh bên dưới và khi trả lời không cần nhắc đến ngữ cảnh
 - Không thêm thông tin bên ngoài
 - Trả lời tự nhiên, dễ hiểu
 - Có thể tham khảo lịch sử chat nếu câu hỏi liên quan

@@ -27,7 +27,7 @@
 │       ├── index.pkl
 │       └── metadata.json
 ├── 🎓 Student_Rag_Info/    # Tài liệu sinh viên
-├── 👨🏫 Teacher_Rag_Info/   # Tài liệu giảng viên  
+├── 👨🏫 Teacher_Rag_Info/   # Tài liệu giảng viên
 └── ⚙️ Admin_Rag_Info/      # Tài liệu quản trị
 ```
 
@@ -112,6 +112,7 @@ API sẽ được khởi chạy tại: `http://localhost:8000`
 ## 📋 API Endpoints
 
 ### Health Check
+
 ```bash
 GET /health
 ```
@@ -119,6 +120,7 @@ GET /health
 ### Quản lý tài liệu
 
 #### Upload tài liệu
+
 ```bash
 POST /documents/vector/add
 Content-Type: multipart/form-data
@@ -132,6 +134,7 @@ Parameters:
 ```
 
 #### Lấy danh sách tài liệu
+
 ```bash
 GET /documents/list?file_type={type}&limit={limit}&skip={skip}
 
@@ -142,6 +145,7 @@ Parameters:
 ```
 
 #### Xóa tài liệu
+
 ```bash
 DELETE /documents/vector/{doc_id}
 
@@ -150,6 +154,7 @@ Parameters:
 ```
 
 #### Lấy danh sách loại file hỗ trợ
+
 ```bash
 GET /documents/types
 ```
@@ -200,14 +205,14 @@ curl -X DELETE "http://localhost:8000/documents/vector/{doc_id}"
 
 ## ⚙️ Biến môi trường
 
-| Biến | Mô tả | Mặc định |
-|------|-------|----------|
-| `GEMINI_API_KEY` | Google Generative AI API key | Required |
-| `DATA_PATH` | Thư mục lưu trữ data | Root_Folder |
-| `VECTOR_DB_PATH` | Thư mục vector database | vectorstore |
-| `MODEL_EMBEDDING` | Đường dẫn model embedding | model/vinallama-7b-chat_q5_0.gguf |
-| `MODEL_PADDLEOCR` | Đường dẫn model PaddleOCR | model/.paddlex |
-| `DATABASE_URL` | MongoDB connection string | mongodb://localhost:27017/ |
+| Biến              | Mô tả                        | Mặc định                          |
+| ----------------- | ---------------------------- | --------------------------------- |
+| `GEMINI_API_KEY`  | Google Generative AI API key | Required                          |
+| `DATA_PATH`       | Thư mục lưu trữ data         | Root_Folder                       |
+| `VECTOR_DB_PATH`  | Thư mục vector database      | vectorstore                       |
+| `MODEL_EMBEDDING` | Đường dẫn model embedding    | model/vinallama-7b-chat_q5_0.gguf |
+| `MODEL_PADDLEOCR` | Đường dẫn model PaddleOCR    | model/.paddlex                    |
+| `DATABASE_URL`    | MongoDB connection string    | mongodb://localhost:27017/        |
 
 ## 🐳 Docker Deployment
 
@@ -253,7 +258,7 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ### docker-compose.yml
 
 ```yaml
-version: '3.8'
+version: "3.8"
 
 services:
   # FastAPI Application
@@ -322,6 +327,7 @@ networks:
 #### 1. Chuẩn bị files
 
 Đảm bảo bạn có cấu trúc thư mục như sau:
+
 ```
 RAG/
 ├── Dockerfile
@@ -407,6 +413,7 @@ docker-compose restart app
 ### Troubleshooting
 
 #### MongoDB connection issues
+
 ```bash
 # Kiểm tra MongoDB logs
 docker-compose logs mongo
@@ -423,6 +430,7 @@ except Exception as e:
 ```
 
 #### Volume permissions
+
 ```bash
 # Fix permissions cho Root_Folder
 sudo chown -R $USER:$USER Root_Folder model logs
@@ -432,6 +440,7 @@ docker-compose exec app chown -R root:root /app/Root_Folder
 ```
 
 #### Memory issues
+
 ```yaml
 # Thêm vào docker-compose.yml trong service app:
 deploy:
@@ -446,7 +455,7 @@ deploy:
 
 ```yaml
 # docker-compose.remote.yml
-version: '3.8'
+version: "3.8"
 
 services:
   app:
@@ -468,7 +477,6 @@ services:
 networks:
   app-network:
     driver: bridge
-
 ```
 
 ```bash
@@ -493,6 +501,7 @@ docker-compose -f docker-compose.remote.yml up -d --build
 ## 🔍 Troubleshooting
 
 ### MongoDB connection issues
+
 ```bash
 # Kiểm tra MongoDB đang chạy
 sudo systemctl status mongod
@@ -502,11 +511,13 @@ sudo systemctl start mongod
 ```
 
 ### Memory issues
+
 - Tăng RAM cho hệ thống
 - Giảm `chunk_size` trong embedding.py
 - Xử lý file theo batch nhỏ hơn
 
 ### FAISS index corruption
+
 ```bash
 # Xóa và tạo lại index
 rm -rf Root_Folder/*/Faiss_Folder/index.*
@@ -528,7 +539,7 @@ Distributed under the MIT License. See `LICENSE` for more information.
 ## 🙏 Acknowledgments
 
 - [FastAPI](https://fastapi.tiangolo.com/) - Web framework
-- [LangChain](https://langchain.com/) - LLM framework  
+- [LangChain](https://langchain.com/) - LLM framework
 - [FAISS](https://faiss.ai/) - Vector similarity search
 - [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - OCR engine
 - [MongoDB](https://mongodb.com/) - Database

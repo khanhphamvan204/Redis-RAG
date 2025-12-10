@@ -982,7 +982,8 @@ def get_session_history(session_id: str) -> SemanticMessageHistory:
                     redis_client=get_redis_client(),
                     vectorizer=vectorizer,
                     ttl=60*60*24*7,  # 7 ngày
-                    prefix="msg:"     # ← Prefix chung
+                    prefix="msg:",    # ← Prefix chung
+                    overwrite=True    # ← Fix schema mismatch
                 )
                 logger.info(f"Tạo history mới cho session: {session_id}")
     return _session_cache[session_id]

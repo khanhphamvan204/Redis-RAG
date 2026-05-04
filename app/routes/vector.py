@@ -1,18 +1,34 @@
 # app/routes/vector.py
-import traceback
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
-from app.services.embedding_service import (
-    add_to_embedding, delete_from_redis_index, get_embedding_model, 
-    smart_metadata_update, get_redis_client, get_index_name
-)
-from app.services.metadata_service import save_metadata, delete_metadata, find_document_info
-from app.services.file_service import get_file_paths
-from app.services.auth_service import verify_token_v2, filter_accessible_files
-from app.config import Config
-from pydantic import BaseModel, Field
-from redisvl.query import VectorQuery
-from redisvl.index import SearchIndex
 import os
+import time
+import gc
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel, Field
+from app.services.auth_service import verify_token_v2, filter_accessible_files
+from app.services.embedding_service import (
+    get_redis_client,
+    get_index_name,
+    get_embedding_model,
+    add_to_embedding,
+    delete_from_redis_index,
+    smart_metadata_update
+)
+from app.services.file_service import get_file_paths
+from app.services.metadata_service import (
+    save_metadata,
+    find_document_info,
+    delete_metadata
+)
+from app.services.cache_service import (
+    get_embedding_cache,
+    get_llm_cache
+)
+from app.config import Config
+from redisvl.index import SearchIndex
+from redisvl.query import VectorQuery
+import logging
+import traceback
 import json
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -797,7 +813,9 @@ async def search_with_llm(request: VectorSearchRequest, current_user: dict = Dep
                     from langchain_google_genai import ChatGoogleGenerativeAI
                     from langchain.prompts import PromptTemplate
                     
-                    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+                    llm = ChatGoogleGenerativeAI(
+                        model="gemini-robotics-er-1.5-preview"
+                    )
 
                     context = "\n\n".join(
                         [f"Tài liệu {i+1}:\n{result['content']}" for i, result in enumerate(top_results)]
@@ -880,6 +898,10 @@ class SearchWithContextResponse(BaseModel):
     query_rewritten: bool = False
     original_query: Optional[str] = None
     rewritten_query: Optional[str] = None
+    # Cache metrics
+    embedding_cache_hit: bool = False
+    llm_cache_hit: bool = False
+    cache_distance: Optional[float] = None
 
 
 # === Hàm chuẩn hóa similarity (giữ nguyên từ code cũ) ===
@@ -1141,7 +1163,7 @@ async def search_with_llm_context(
                                 })
                                 
                                 # Dừng khi đủ 3 câu hỏi
-                                if len(history_messages) >= 3:
+                                if len(history_messages) >= 5:
                                     break
                                     
                         except Exception as parse_error:
@@ -1197,9 +1219,35 @@ async def search_with_llm_context(
                 rewritten_query=rewritten_query if query_rewritten else None
             )
         
-        # Generate embedding CHO REWRITTEN QUERY
-        embedding_model = get_embedding_model()
-        query_embedding = embedding_model.embed_query(rewritten_query) 
+        # ========================================
+        # EMBEDDING CACHE CHECK
+        # ========================================
+        embedding_cache = get_embedding_cache()
+        embedding_cache_hit = False
+        query_embedding = None
+        
+        # Try cache first
+        model_name = "dangvantuan/vietnamese-document-embedding"
+        cached_embedding = embedding_cache.get(rewritten_query, model_name)
+        
+        if cached_embedding is not None:
+            query_embedding = cached_embedding
+            embedding_cache_hit = True
+            logger.info(f"  Embedding cache HIT")
+        else:
+            # Generate embedding and cache it
+            embedding_model = get_embedding_model()
+            query_embedding = embedding_model.embed_query(rewritten_query)
+            
+            # Store in cache
+            embedding_cache.store(
+                text=rewritten_query,
+                model_name=model_name,
+                embedding=query_embedding,
+                metadata={"timestamp": time.time()}
+            )
+            embedding_cache_hit = False
+            logger.info(f"  Embedding cache MISS, stored new embedding") 
         
         # Search
         vector_query = VectorQuery(
@@ -1278,20 +1326,18 @@ async def search_with_llm_context(
             full_context = doc_context
         
         # ========================================
-        # 5. GỌI LLM (dùng ORIGINAL query trong prompt!)
+        # 5. GỌI LLM (với LLM CACHE)
         # ========================================
         llm_response = "Xin lỗi, tôi không tìm thấy thông tin phù hợp."
+        llm_cache_hit = False
+        cache_distance = None
         
         if top_results or history_used:
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
                 from langchain.prompts import PromptTemplate
                 
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-2.5-flash",
-                    temperature=0.3
-                )
-                
+                # Build the full prompt
                 prompt_template = PromptTemplate(
                     input_variables=["query", "context"],
                     template="""Bạn là trợ lý AI chuyên nghiệp.
@@ -1322,14 +1368,46 @@ async def search_with_llm_context(
 Hãy trả lời câu hỏi dựa trên ngữ cảnh trên với format Markdown đẹp mắt và dễ đọc."""
                 )
                 
-                # Dùng ORIGINAL query cho LLM để giữ tính tự nhiên
-                prompt = prompt_template.format(
+                # Use ORIGINAL query for natural interaction
+                full_prompt = prompt_template.format(
                     query=original_query,
                     context=full_context
                 )
                 
-                result = llm.invoke(prompt)
-                llm_response = result.content
+                # ========================================
+                # LLM CACHE CHECK
+                # ========================================
+                llm_cache = get_llm_cache()
+                cached_result = llm_cache.check(full_prompt)
+                
+                if cached_result:
+                    # Cache HIT - use cached response
+                    llm_response = cached_result.get('response')
+                    cache_distance = cached_result.get('distance', 0.0)
+                    llm_cache_hit = True
+                    logger.info(f"  LLM cache HIT (distance: {cache_distance:.4f})")
+                else:
+                    # Cache MISS - call LLM and cache result
+                    llm = ChatGoogleGenerativeAI(
+                        model="gemini-robotics-er-1.5-preview",
+                        temperature=0.3
+                    )
+                    
+                    result = llm.invoke(full_prompt)
+                    llm_response = result.content
+                    
+                    # Store in cache
+                    llm_cache.store(
+                        prompt=full_prompt,
+                        response=llm_response,
+                        metadata={
+                            "model": "gemini-robotics-er-1.5-preview",
+                            "timestamp": time.time(),
+                            "original_query": original_query
+                        }
+                    )
+                    llm_cache_hit = False
+                    logger.info(f"  LLM cache MISS, called LLM and cached response")
                 
             except Exception as e:
                 logger.error(f"LLM thất bại: {e}")
@@ -1376,7 +1454,7 @@ Hãy trả lời câu hỏi dựa trên ngữ cảnh trên với format Markdown
                 context_found=len(top_results),
                 response_time_ms=response_time_ms,
                 llm_response=llm_response,
-                model_used="gemini-2.5-flash",
+                model_used="gemini-robotics-er-1.5-preview",
                 query_rewritten=query_rewritten,
                 history_used=history_used,
                 history_count=history_count
@@ -1398,7 +1476,10 @@ Hãy trả lời câu hỏi dựa trên ngữ cảnh trên với format Markdown
             history_count=history_count,
             query_rewritten=query_rewritten,
             original_query=original_query if query_rewritten else None,
-            rewritten_query=rewritten_query if query_rewritten else None
+            rewritten_query=rewritten_query if query_rewritten else None,
+            embedding_cache_hit=embedding_cache_hit,
+            llm_cache_hit=llm_cache_hit,
+            cache_distance=cache_distance
         )
     
     except HTTPException:

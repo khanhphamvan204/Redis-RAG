@@ -440,6 +440,45 @@ async def create_folder_endpoint(
     except PyMongoError as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Lỗi DB: {e}")
 
+@router.delete(
+    "/agent-list/api/folders/delete/{folder_name}",
+    response_model=GenericResponse,
+    summary="Xóa một folder theo tên",
+    tags=["Folders"]
+)
+async def delete_folder_endpoint(
+    folder_name: str = Path(..., description="Tên của folder cần xóa"),
+    collection: AsyncIOMotorCollection = Depends(get_db_collection),
+    current_user: dict = Depends(verify_token_v2)
+):
+    """
+    Xóa một folder theo folder_name.
+    Yêu cầu authentication (JWT token).
+    """
+    try:
+        result = await collection.delete_one({"folder_name": folder_name})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Không tìm thấy folder '{folder_name}' để xóa."
+            )
+        
+        logger.info(f"Đã xóa folder: {folder_name} bởi user: {current_user.get('username')}")
+        return GenericResponse(
+            message=f"Xóa folder '{folder_name}' thành công.",
+            status_code=200,
+            success=True
+        )
+    except HTTPException:
+        raise
+    except PyMongoError as e:
+        logger.error(f"Lỗi DB khi xóa folder '{folder_name}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=f"Lỗi DB: {e}"
+        )
+
 
 # --- 7. Endpoints API cho Authentication ---
 

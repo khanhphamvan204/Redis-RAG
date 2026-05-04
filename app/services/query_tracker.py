@@ -101,7 +101,7 @@ class QueryTracker:
         context_found: int,
         response_time_ms: float,
         llm_response: str,
-        model_used: str = "gemini-2.5-flash",
+        model_used: str = "gemini-robotics-er-1.5-preview",
         query_rewritten: bool = False,
         history_used: bool = False,
         history_count: int = 0

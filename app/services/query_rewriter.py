@@ -13,10 +13,10 @@ class QueryRewriter:
     để tạo query tốt hơn cho vector search
     """
     
-    def __init__(self, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, model_name: str = "gemini-robotics-er-1.5-preview"):
         self.llm = ChatGoogleGenerativeAI(
             model=model_name,
-            temperature=0.1  # Giảm temperature để output nhất quán
+            temperature=0.1,  # Giảm temperature để output nhất quán
         )
         
         self.rewrite_prompt = ChatPromptTemplate.from_messages([

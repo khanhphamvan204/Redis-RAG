@@ -41,10 +41,18 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Message history init failed: {e}")
     
-    # 3. Kafka producer
+    # 3. Cache services (embedding + LLM)
+    try:
+        from app.services.cache_service import ensure_cache_indices
+        await ensure_cache_indices()
+        logger.info("Cache services initialized")
+    except Exception as e:
+        logger.warning(f"Cache init failed (non-critical): {e}")
+    
+    # 4. Kafka producer
     try:
         await initialize_kafka()
-        logger.info("✓ Kafka producer initialized")
+        logger.info("Kafka producer initialized")
     except Exception as e:
         logger.warning(f"Kafka init failed (non-critical): {e}")
 
@@ -230,4 +238,10 @@ async def websocket_analytics_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_includes=["*.env"]
+    )

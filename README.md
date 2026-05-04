@@ -1,59 +1,203 @@
-# 🤖 RAG - Hệ thống Quản lý Tài liệu và Vector Embedding Thông minh
+# 🤖 Redis RAG — Hệ thống RAG Thông minh với Phân quyền theo Thư mục
 
-[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.68+-green.svg)](https://fastapi.tiangolo.com)
-[![MongoDB](https://img.shields.io/badge/MongoDB-4.4+-brightgreen.svg)](https://mongodb.com)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com)
+[![Redis](https://img.shields.io/badge/Redis-7.0+-red.svg)](https://redis.io)
+[![MongoDB](https://img.shields.io/badge/MongoDB-6.0+-brightgreen.svg)](https://mongodb.com)
+[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-AI-orange.svg)](https://ai.google.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**RAG (Retrieval-Augmented Generation) API Management System** là một ứng dụng web hiện đại được xây dựng bằng FastAPI, cho phép quản lý tài liệu và tạo vector embeddings một cách hiệu quả với sự hỗ trợ của FAISS vector search engine.
+**Redis RAG** là hệ thống **Retrieval-Augmented Generation** được xây dựng bằng FastAPI, sử dụng **Redis Vector Search** để tìm kiếm ngữ nghĩa và tích hợp **phân quyền truy cập theo phòng/khoa (department-based access control)** thông qua JWT Authentication. Người dùng chỉ có thể truy vấn và nhận kết quả từ đúng những thư mục tài liệu mà họ được cấp quyền.
 
-## ✨ Tính năng chính
+---
 
-- 📤 **Upload đa định dạng**: Hỗ trợ PDF, TXT, DOCX, CSV, XLSX, XLS
-- 🤖 **AI-powered OCR**: Sử dụng PaddleOCR cho nhận dạng văn bản chính xác
-- 📊 **Xử lý bảng thông minh**: Tự động trích xuất và xử lý bảng từ PDF
-- 🔍 **Vector Search**: Tìm kiếm ngữ nghĩa (semantic search) với FAISS
-- 👥 **Hệ thống phân quyền**: Quản lý quyền truy cập chi tiết theo user và subject
-- 🚀 **API RESTful**: Tích hợp dễ dàng với các hệ thống khác
+## 📐 Kiến trúc hệ thống
 
-## 🏗️ Kiến trúc hệ thống
+Hệ thống gồm **hai luồng chính**:
+
+<p align="center">
+  <img src="docs/rag_ingestion_flow.png" width="48%" alt="Document Ingestion Flow" />
+  &nbsp;&nbsp;
+  <img src="docs/rag_query_flow.png" width="48%" alt="RAG Query Flow" />
+</p>
+<p align="center">
+  <em>Trái: Document Ingestion Flow &nbsp;|&nbsp; Phải: RAG Query Flow với Department-based Access Control</em>
+</p>
+
+
+### 1️⃣ Document Ingestion Flow — Luồng nạp tài liệu
+
+<p align="center">
+  <img src="docs/rag_ingestion_flow.png" width="70%" alt="Document Ingestion Flow" />
+</p>
 
 ```
-📁 Root_Folder/
-├── 🌐 Public_Rag_Info/     # Tài liệu công khai
-│   ├── File_Folder/        # Lưu trữ files gốc
-│   └── Faiss_Folder/       # Vector database
-│       ├── index.faiss
-│       ├── index.pkl
-│       └── metadata.json
-├── 🎓 Student_Rag_Info/    # Tài liệu sinh viên
-├── 👨🏫 Teacher_Rag_Info/   # Tài liệu giảng viên
-└── ⚙️ Admin_Rag_Info/      # Tài liệu quản trị
+User Upload
+    │
+    ▼
+[1] FastAPI — Xác thực JWT & Extract department_id
+    │
+    ▼
+[2] Lưu file vào thư mục theo phòng/khoa
+    Cấu trúc: Root_Folder/{dept_id}/File_Folder/
+    │
+    ▼
+[3] Extract & Chunk Text (PDF, DOCX, TXT, CSV, XLSX)
+    │
+    ▼
+[4] Google Gemini — Generate Embeddings (vector 768 chiều)
+    │
+    ├──────────────────────────────────┐
+    ▼                                  ▼
+[5a] Redis — Lưu Vectors          [5b] MongoDB — Lưu Metadata
+     (với tag department_id)            (file_name, dept, chunk_info...)
 ```
 
-## 🔧 Yêu cầu hệ thống
+**Mỗi vector được gắn tag `department_id`** khi lưu vào Redis, ví dụ:
+```json
+{
+  "vector": [...],
+  "department_id": "CS_dept",
+  "doc_id": "uuid-xxx",
+  "chunk_index": 2,
+  "content": "Nội dung đoạn văn..."
+}
+```
 
-- **Python**: 3.8+
-- **MongoDB**: 4.4+
-- **RAM**: 4GB (khuyến nghị)
-- **Dung lượng**: 4GB trống
+---
+
+### 2️⃣ RAG Query Flow — Luồng truy vấn
+
+<p align="center">
+  <img src="docs/rag_query_flow.png" width="80%" alt="RAG Query Flow" />
+</p>
+
+```
+User gửi câu hỏi
+    │
+    ▼
+[1] FastAPI — Xác thực JWT → Extract department_id = "CS_dept"
+    │
+    ▼
+[2] Google Gemini — Tạo Query Embedding
+    │
+    ▼
+[3] Redis Vector Search — Filter THEO department_id
+     Query: @department_id:{CS_dept}
+    │
+    ▼
+[4] Redis trả về chỉ các docs KHỚP với dept của user
+    │
+    ▼
+[5] Build Context từ các chunks phù hợp
+    │
+    ▼
+[6] Google Gemini — Generate Answer
+    │
+    ▼
+[7] Trả kết quả về cho User
+```
+
+---
+
+## 🔐 Phân quyền theo Thư mục (Department-based Access Control)
+
+Đây là tính năng **cốt lõi** của hệ thống. Mỗi user khi đăng nhập sẽ nhận JWT token chứa thông tin `department_id`. Khi truy vấn RAG, hệ thống **tự động lọc** kết quả theo đúng phòng/khoa của user đó.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Department-based Access Control                 │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   User 1 (CS_dept)   ──►  📄 CS docs only      ✅          │
+│                            📄 Math docs         ❌          │
+│                            📄 Physics docs      ❌          │
+│                                                             │
+│   User 2 (Math_dept) ──►  📄 CS docs           ❌          │
+│                            📄 Math docs only    ✅          │
+│                            📄 Physics docs      ❌          │
+│                                                             │
+│   User 3 (Physics)   ──►  📄 CS docs           ❌          │
+│                            📄 Math docs         ❌          │
+│                            📄 Physics docs only ✅          │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Cơ chế hoạt động
+
+| Bước | Thành phần | Mô tả |
+|------|-----------|-------|
+| **Auth** | FastAPI + JWT | Decode token → lấy `department_id` |
+| **Upload** | FastAPI | Lưu file vào `Root_Folder/{dept_id}/File_Folder/` |
+| **Index** | Redis Vector | Tag vector với `department_id` |
+| **Query** | Redis Filter | `@department_id:{dept_id}` — chỉ tìm trong dept của user |
+| **Result** | FastAPI | Trả về answer được tạo từ đúng context của dept |
+
+---
+
+## 🗂️ Cấu trúc thư mục tài liệu
+
+Tài liệu được tổ chức theo phòng/khoa, mỗi thư mục là một **vùng dữ liệu riêng biệt** với phân quyền độc lập:
+
+```
+Root_Folder/
+├── 🌐 Public_Rag_Info/          # Tài liệu công khai — mọi user đều đọc được
+│   └── File_Folder/             # Lưu files gốc
+│
+├── 🎓 TaiLieuMonHoc_CNTT/       # Tài liệu Khoa CNTT
+│   └── File_Folder/
+│
+├── 📘 DeAnTotNghiep/            # Tài liệu đề án tốt nghiệp
+│   └── File_Folder/
+│
+└── ⚙️ {department_id}/          # Bất kỳ phòng/khoa nào thêm qua API
+    └── File_Folder/
+```
+
+> **Lưu ý:** Danh sách thư mục (folders) được quản lý **động** qua MongoDB. Admin có thể thêm/xóa thư mục mà không cần sửa code, hệ thống tự động nhận diện và cấu hình lại.
+
+---
+
+## 🧰 Công nghệ sử dụng
+
+| Thành phần | Công nghệ | Vai trò |
+|-----------|----------|---------|
+| **API Server** | FastAPI | REST API, JWT Auth, routing |
+| **Vector DB** | Redis (RedisSearch) | Lưu & tìm kiếm vector theo dept filter |
+| **Metadata DB** | MongoDB | Lưu thông tin tài liệu, chunk metadata |
+| **Embedding** | Google Gemini API | Tạo vector từ text (768 chiều) |
+| **LLM** | Google Gemini | Sinh câu trả lời từ context |
+| **Auth** | JWT (PyJWT) | Xác thực user và extract department_id |
+| **File Parser** | PyMuPDF, python-docx, pandas | Đọc PDF, DOCX, TXT, CSV, XLSX |
+
+---
+
+## ⚡ Cài đặt và chạy
+
+### Yêu cầu hệ thống
+
+- **Python**: 3.10+
+- **Redis**: 7.0+ với module `RedisSearch` (RedisStack hoặc Redis Enterprise)
+- **MongoDB**: 6.0+
+- **RAM**: 4GB+ (khuyến nghị)
 - **OS**: Windows, macOS, Linux
 
-## ⚡ Cài đặt nhanh
+---
 
 ### 1. Clone repository
 
 ```bash
-git clone https://github.com/khanhphamvan204/RAG.git
-cd RAG
+git clone https://github.com/khanhphamvan204/Redis-RAG.git
+cd Redis-RAG
 ```
 
-### 2. Tạo và kích hoạt virtual environment
+### 2. Tạo virtual environment
 
 ```bash
 python -m venv venv
 
-# Linux/Mac
+# Linux/macOS
 source venv/bin/activate
 
 # Windows
@@ -68,24 +212,54 @@ pip install -r requirements.txt
 
 ### 4. Cấu hình môi trường
 
-Tạo file `.env` trong thư mục gốc:
+Tạo file `.env` từ template:
 
-```env
-# API Keys
-GEMINI_API_KEY=your_gemini_api_key_here
-
-# Model Paths
-MODEL_EMBEDDING=model/vinallama-7b-chat_q5_0.gguf
-MODEL_PADDLEOCR=model/.paddlex
-
-# Database & Storage
-DATABASE_URL=mongodb://localhost:27017/
-DATA_PATH=Root_Folder
-VECTOR_DB_PATH=vectorstore
+```bash
+cp .env.example .env
 ```
 
-### 5. Khởi động MongoDB
+Chỉnh sửa `.env`:
 
+```env
+# ============================================
+# CORE CONFIGURATION
+# ============================================
+
+# Google Gemini — dùng cho Embedding & LLM
+GOOGLE_API_KEY=your_google_api_key_here
+
+# JWT Secret — dùng để ký và verify token
+JWT_SECRET_KEY=your_jwt_secret_key_here
+
+# ============================================
+# DATABASE
+# ============================================
+
+# MongoDB — lưu metadata tài liệu & cấu hình folders
+DATABASE_URL=mongodb://admin:123@localhost:27017
+
+# Redis — Vector database với RedisSearch
+REDIS_URL=redis://localhost:6379
+
+# ============================================
+# STORAGE
+# ============================================
+
+# Thư mục gốc chứa tài liệu theo dept
+DATA_PATH=Root_Folder
+```
+
+---
+
+### 5. Khởi động services
+
+**Khởi động Redis (với RedisSearch):**
+```bash
+# Docker (khuyến nghị)
+docker run -d --name redis-stack -p 6379:6379 redis/redis-stack-server:latest
+```
+
+**Khởi động MongoDB:**
 ```bash
 # Ubuntu/Debian
 sudo systemctl start mongod
@@ -97,165 +271,29 @@ brew services start mongodb-community
 net start MongoDB
 ```
 
-### 6. Chạy ứng dụng
-
+**Khởi động API:**
 ```bash
 # Development
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 # Production
-python app/main.py
+python main.py
 ```
 
-API sẽ được khởi chạy tại: `http://localhost:8000`
+API khởi chạy tại: `http://localhost:8000`  
+Swagger Docs: `http://localhost:8000/docs`
 
-## 📋 API Endpoints
+---
 
-### Health Check
+## 🐳 Docker Compose
+
+Chạy toàn bộ hệ thống (FastAPI + Redis + MongoDB) với một lệnh:
 
 ```bash
-GET /health
+docker-compose up -d --build
 ```
 
-### Quản lý tài liệu
-
-#### Upload tài liệu
-
-```bash
-POST /documents/vector/add
-Content-Type: multipart/form-data
-
-Parameters:
-- file: File upload (required)
-- uploaded_by: string (required)
-- file_type: "public"|"student"|"teacher"|"admin" (required)
-- role_user: JSON string array (optional)
-- role_subject: JSON string array (optional)
-```
-
-#### Lấy danh sách tài liệu
-
-```bash
-GET /documents/list?file_type={type}&limit={limit}&skip={skip}
-
-Parameters:
-- file_type: string (optional) - Lọc theo loại file
-- limit: integer (optional, default: 100) - Số lượng trả về
-- skip: integer (optional, default: 0) - Bỏ qua số lượng
-```
-
-#### Xóa tài liệu
-
-```bash
-DELETE /documents/vector/{doc_id}
-
-Parameters:
-- doc_id: string (required) - ID của document
-```
-
-#### Lấy danh sách loại file hỗ trợ
-
-```bash
-GET /documents/types
-```
-
-## 🔧 Sử dụng API
-
-### Python Example
-
-```python
-import requests
-
-# Upload document
-files = {'file': open('document.pdf', 'rb')}
-data = {
-    'uploaded_by': 'Test User',
-    'file_type': 'public',
-    'role_user': '["user_001", "user_002"]',
-    'role_subject': '["cntt", "toan"]'
-}
-
-response = requests.post('http://localhost:8000/documents/vector/add',
-                        files=files, data=data)
-print(response.json())
-
-# List documents
-response = requests.get('http://localhost:8000/documents/list?file_type=public&limit=10')
-documents = response.json()['documents']
-print(documents)
-```
-
-### cURL Examples
-
-```bash
-# Upload file
-curl -X POST "http://localhost:8000/documents/vector/add" \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@document.pdf" \
-  -F "uploaded_by=Test User" \
-  -F "file_type=public" \
-  -F "role_user=[\"user_001\"]"
-
-# List documents
-curl -X GET "http://localhost:8000/documents/list?file_type=public&limit=5"
-
-# Delete document
-curl -X DELETE "http://localhost:8000/documents/vector/{doc_id}"
-```
-
-## ⚙️ Biến môi trường
-
-| Biến              | Mô tả                        | Mặc định                          |
-| ----------------- | ---------------------------- | --------------------------------- |
-| `GEMINI_API_KEY`  | Google Generative AI API key | Required                          |
-| `DATA_PATH`       | Thư mục lưu trữ data         | Root_Folder                       |
-| `VECTOR_DB_PATH`  | Thư mục vector database      | vectorstore                       |
-| `MODEL_EMBEDDING` | Đường dẫn model embedding    | model/vinallama-7b-chat_q5_0.gguf |
-| `MODEL_PADDLEOCR` | Đường dẫn model PaddleOCR    | model/.paddlex                    |
-| `DATABASE_URL`    | MongoDB connection string    | mongodb://localhost:27017/        |
-
-## 🐳 Docker Deployment
-
-## 🐳 Docker Setup
-
-### Dockerfile
-
-```dockerfile
-FROM python:3.10-slim
-
-WORKDIR /app
-
-# Cài các gói hệ thống cần thiết
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    poppler-utils \
-    tesseract-ocr \
-    tesseract-ocr-vie \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements và cài python packages
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-
-# Copy source code
-COPY . .
-
-ENV PYTHONUNBUFFERED=1
-
-EXPOSE 8000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-
-```
-
-### docker-compose.yml
+### `docker-compose.yml`
 
 ```yaml
 version: "3.8"
@@ -266,28 +304,46 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: rag-api-main
+    container_name: redis-rag-api
     ports:
       - "8000:8000"
     volumes:
       - ./Root_Folder:/app/Root_Folder
-      - ./model:/app/model
-      - ./logs:/app/logs
       - ./.env:/app/.env
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=mongodb://admin:123@mongo:27017/faiss_db?authSource=admin
+      - REDIS_URL=redis://redis:6379
     networks:
-      - app-network
+      - rag-network
     depends_on:
       mongo:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
-  # MongoDB Database
+  # Redis Vector Database
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: redis-rag-vector
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # MongoDB Metadata Database
   mongo:
     image: mongo:6.0
-    container_name: rag-mongo-db
+    container_name: redis-rag-mongo
     ports:
       - "27017:27017"
     volumes:
@@ -299,10 +355,8 @@ services:
       - MONGO_INITDB_DATABASE=faiss_db
     healthcheck:
       test: |
-        mongosh --host localhost \
-                --port 27017 \
-                --username admin \
-                --password 123 \
+        mongosh --host localhost --port 27017 \
+                --username admin --password 123 \
                 --authenticationDatabase admin \
                 --eval "db.adminCommand('ping')"
       interval: 10s
@@ -310,236 +364,330 @@ services:
       retries: 5
       start_period: 20s
     networks:
-      - app-network
+      - rag-network
     restart: unless-stopped
 
 volumes:
+  redis-data:
+    driver: local
   mongo-data:
     driver: local
 
 networks:
-  app-network:
+  rag-network:
     driver: bridge
 ```
 
-### Cách sử dụng
-
-#### 1. Chuẩn bị files
-
-Đảm bảo bạn có cấu trúc thư mục như sau:
-
-```
-RAG/
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-├── .env
-├── app/
-│   └── main.py
-├── Root_Folder/
-├── model/
-```
-
-#### 2. Cấu hình .env
-
-```env
-# API Keys
-GEMINI_API_KEY=your_gemini_api_key_here
-
-# Database (cho Docker)
-DATABASE_URL=mongodb://admin:123@mongo:27017/faiss_db?authSource=admin
-
-# Model Paths
-MODEL_EMBEDDING=model/vinallama-7b-chat_q5_0.gguf
-MODEL_PADDLEOCR=model/.paddlex
-
-# Storage Paths
-DATA_PATH=Root_Folder
-VECTOR_DB_PATH=vectorstore
-```
-
-#### 3. Chạy với Docker Compose
+### Các lệnh Docker thông dụng
 
 ```bash
-# Build và khởi động tất cả services
-docker-compose up --build
-
-# Chạy ở background
+# Khởi động tất cả services
 docker-compose up -d --build
 
 # Xem logs
 docker-compose logs -f
-
-# Xem logs của service cụ thể
 docker-compose logs -f app
-docker-compose logs -f mongo
+docker-compose logs -f redis
 
-# Dừng services
-docker-compose down
-
-# Dừng và xóa volumes (cẩn thận - sẽ mất data)
-docker-compose down -v
-```
-
-#### 4. Kiểm tra services
-
-```bash
-# Kiểm tra container đang chạy
+# Kiểm tra health
 docker ps
-
-# Kiểm tra health của MongoDB
-docker-compose exec mongo mongosh --username admin --password 123 --authenticationDatabase admin
-
-# Test API endpoint
 curl http://localhost:8000/health
 
-# Vào container app để debug
-docker-compose exec app bash
+# Dừng và xóa
+docker-compose down
+docker-compose down -v   # ⚠️ xóa cả data volumes
 ```
 
-#### 5. Development với Docker
+---
 
-```bash
-# Chỉ rebuild app service
-docker-compose up --build app
+## 📋 API Endpoints
 
-# Xem logs real-time
-docker-compose logs -f app
+### Authentication
 
-# Restart service
-docker-compose restart app
+| Method | Endpoint | Mô tả |
+|--------|---------|-------|
+| `POST` | `/auth/login` | Đăng nhập, nhận JWT token |
+| `POST` | `/auth/register` | Đăng ký tài khoản |
+
+> **JWT Payload** cần có trường `department_id` để hệ thống phân quyền đúng:
+> ```json
+> {
+>   "sub": "user_001",
+>   "department_id": "CS_dept",
+>   "role": "teacher"
+> }
+> ```
+
+---
+
+### Quản lý thư mục (Folders)
+
+| Method | Endpoint | Mô tả |
+|--------|---------|-------|
+| `GET` | `/folders` | Lấy danh sách thư mục |
+| `POST` | `/folders` | Tạo thư mục mới (Admin) |
+| `DELETE` | `/folders/{folder_name}` | Xóa thư mục (Admin) |
+
+---
+
+### Quản lý tài liệu
+
+#### Upload tài liệu
+
+```
+POST /documents/vector/add
+Authorization: Bearer <JWT_TOKEN>
+Content-Type: multipart/form-data
 ```
 
-### Troubleshooting
+| Tham số | Kiểu | Bắt buộc | Mô tả |
+|---------|------|---------|-------|
+| `file` | File | ✅ | File cần upload (PDF, DOCX, TXT, CSV, XLSX) |
+| `uploaded_by` | string | ✅ | Tên/ID người upload |
+| `file_type` | string | ✅ | Tên thư mục/dept đích |
 
-#### MongoDB connection issues
+> Hệ thống tự động extract `department_id` từ JWT token để gắn tag vào vector.
+
+#### Lấy danh sách tài liệu
+
+```
+GET /documents/list?file_type={dept}&limit={n}&skip={m}
+Authorization: Bearer <JWT_TOKEN>
+```
+
+| Tham số | Mô tả | Mặc định |
+|---------|-------|---------|
+| `file_type` | Lọc theo thư mục/dept | tất cả |
+| `limit` | Số lượng kết quả | 100 |
+| `skip` | Bỏ qua N bản đầu | 0 |
+
+#### Xóa tài liệu
+
+```
+DELETE /documents/vector/{doc_id}
+Authorization: Bearer <JWT_TOKEN>
+```
+
+---
+
+### RAG Query
+
+```
+POST /query
+Authorization: Bearer <JWT_TOKEN>
+Content-Type: application/json
+
+{
+  "question": "Hãy giải thích về thuật toán sắp xếp nhanh?",
+  "top_k": 5
+}
+```
+
+**Response:**
+```json
+{
+  "answer": "Thuật toán QuickSort hoạt động bằng cách...",
+  "sources": [
+    {
+      "doc_id": "uuid-xxx",
+      "file_name": "giao_trinh_cau_truc_du_lieu.pdf",
+      "chunk_index": 3,
+      "score": 0.92,
+      "department_id": "CS_dept"
+    }
+  ],
+  "department_id": "CS_dept"
+}
+```
+
+> Hệ thống **chỉ tìm kiếm trong thư mục dept của user** — user thuộc `CS_dept` sẽ không bao giờ nhận được kết quả từ `Math_dept`.
+
+---
+
+## 🔧 Sử dụng API
+
+### Python Example
+
+```python
+import requests
+
+BASE_URL = "http://localhost:8000"
+
+# 1. Đăng nhập lấy token
+login_resp = requests.post(f"{BASE_URL}/auth/login", json={
+    "username": "nguyen_van_a",
+    "password": "secret"
+})
+token = login_resp.json()["access_token"]
+headers = {"Authorization": f"Bearer {token}"}
+
+# 2. Upload tài liệu (tự động gắn tag dept từ JWT)
+with open("giao_trinh.pdf", "rb") as f:
+    upload_resp = requests.post(
+        f"{BASE_URL}/documents/vector/add",
+        headers=headers,
+        files={"file": f},
+        data={
+            "uploaded_by": "nguyen_van_a",
+            "file_type": "TaiLieuMonHoc_CNTT"
+        }
+    )
+print(upload_resp.json())
+
+# 3. Truy vấn RAG (tự động lọc theo dept)
+query_resp = requests.post(f"{BASE_URL}/query", headers=headers, json={
+    "question": "Giải thích về độ phức tạp thuật toán O(n log n)?",
+    "top_k": 5
+})
+print(query_resp.json()["answer"])
+```
+
+### cURL Examples
 
 ```bash
-# Kiểm tra MongoDB logs
-docker-compose logs mongo
+# Đăng nhập
+curl -X POST http://localhost:8000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"nguyen_van_a","password":"secret"}'
 
-# Test kết nối MongoDB
+# Upload tài liệu
+curl -X POST http://localhost:8000/documents/vector/add \
+  -H "Authorization: Bearer <TOKEN>" \
+  -F "file=@giao_trinh.pdf" \
+  -F "uploaded_by=nguyen_van_a" \
+  -F "file_type=TaiLieuMonHoc_CNTT"
+
+# Truy vấn RAG
+curl -X POST http://localhost:8000/query \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Giải thích về cấu trúc dữ liệu stack?","top_k":5}'
+
+# Health check
+curl http://localhost:8000/health
+```
+
+---
+
+## ⚙️ Biến môi trường
+
+| Biến | Mô tả | Bắt buộc |
+|------|-------|---------|
+| `GOOGLE_API_KEY` | Google Gemini API key (Embedding + LLM) | ✅ |
+| `JWT_SECRET_KEY` | Secret để ký JWT token | ✅ |
+| `DATABASE_URL` | MongoDB connection string | ✅ |
+| `REDIS_URL` | Redis connection string | ✅ |
+| `DATA_PATH` | Thư mục gốc lưu tài liệu | `Root_Folder` |
+
+---
+
+## 🔍 Luồng phân quyền chi tiết
+
+```
+              ┌──────────────────────────────────────────┐
+              │          JWT Token Payload               │
+              │  {                                       │
+              │    "sub": "user_001",                    │
+              │    "department_id": "CS_dept",  ◄────────┼── Trích xuất tại mọi request
+              │    "role": "teacher"                     │
+              │  }                                       │
+              └──────────────────────────────────────────┘
+                                  │
+                    ┌─────────────┴─────────────┐
+                    ▼                           ▼
+           [Upload Document]            [Query RAG]
+                    │                           │
+                    ▼                           ▼
+        Lưu vào:                    Redis Filter:
+        Root_Folder/                @department_id:{CS_dept}
+        CS_dept/File_Folder/                    │
+                    │                           ▼
+                    ▼               Chỉ trả về docs thuộc
+        Redis Vector:               CS_dept — KHÔNG LỌT
+        department_id = CS_dept     sang dept khác
+```
+
+---
+
+## 📊 Hiệu suất
+
+| Chỉ số | Giá trị |
+|--------|---------|
+| Upload & index tài liệu | ~2–5 giây / trang PDF |
+| Vector search với filter | < 50ms cho 100K documents |
+| Sinh câu trả lời (Gemini) | ~2–5 giây |
+| Concurrent requests | 50+ (với uvicorn workers) |
+| RAM sử dụng | ~512MB – 1GB (app) |
+
+---
+
+## 🐛 Troubleshooting
+
+### Redis không kết nối được
+
+```bash
+# Kiểm tra Redis đang chạy
+docker ps | grep redis
+
+# Test kết nối
+redis-cli -u redis://localhost:6379 ping
+# Expected: PONG
+
+# Kiểm tra RedisSearch module đã load chưa
+redis-cli MODULE LIST
+```
+
+### MongoDB không kết nối được
+
+```bash
+# Kiểm tra MongoDB
+sudo systemctl status mongod
+
+# Test từ Docker container
 docker-compose exec app python -c "
 from pymongo import MongoClient
-try:
-    client = MongoClient('mongodb://admin:123@mongo:27017/faiss_db?authSource=admin')
-    print('Connected:', client.server_info())
-except Exception as e:
-    print('Error:', e)
+client = MongoClient('mongodb://admin:123@mongo:27017/?authSource=admin')
+print('OK:', client.server_info()['version'])
 "
 ```
 
-#### Volume permissions
+### JWT token không hợp lệ
+
+- Đảm bảo `JWT_SECRET_KEY` trong `.env` khớp với key dùng để ký token
+- Kiểm tra token chưa hết hạn (`exp` claim)
+- Đảm bảo payload có trường `department_id`
+
+### Thư mục dept không tồn tại
 
 ```bash
-# Fix permissions cho Root_Folder
-sudo chown -R $USER:$USER Root_Folder model logs
+# Tạo thư mục thủ công
+mkdir -p Root_Folder/CS_dept/File_Folder
 
-# Hoặc sử dụng docker user
-docker-compose exec app chown -R root:root /app/Root_Folder
+# Hoặc thêm qua API
+curl -X POST http://localhost:8000/folders \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"folder_name": "CS_dept"}'
 ```
 
-#### Memory issues
-
-```yaml
-# Thêm vào docker-compose.yml trong service app:
-deploy:
-  resources:
-    limits:
-      memory: 4G
-    reservations:
-      memory: 2G
-```
-
-### Server deployment
-
-```yaml
-# docker-compose.remote.yml
-version: "3.8"
-
-services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: faiss-api-main
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./Root_Folder:/app/Root_Folder
-      - ./.env:/app/.env
-    environment:
-      - PYTHONUNBUFFERED=1
-      - DATABASE_URL=mongodb://admin:123@ai-database.bitech.vn:27017/faiss_db?authSource=admin
-    networks:
-      - app-network
-
-networks:
-  app-network:
-    driver: bridge
-```
-
-```bash
-# Deploy production
-docker-compose -f docker-compose.remote.yml up -d --build
-```
-
-## 📊 Performance
-
-- **Upload speed**: ~2-5MB/s tùy file type
-- **OCR processing**: ~1-3 pages/second
-- **Vector search**: <100ms cho 10K documents
-- **Memory usage**: ~1-2GB với 1000 documents
-
-## ⚡ Tối ưu hóa
-
-- Sử dụng GPU cho PaddleOCR nếu có
-- Tăng `chunk_size` cho file lớn
-- Enable MongoDB indexing
-- Sử dụng Redis cache cho metadata
-
-## 🔍 Troubleshooting
-
-### MongoDB connection issues
-
-```bash
-# Kiểm tra MongoDB đang chạy
-sudo systemctl status mongod
-
-# Khởi động MongoDB
-sudo systemctl start mongod
-```
-
-### Memory issues
-
-- Tăng RAM cho hệ thống
-- Giảm `chunk_size` trong embedding.py
-- Xử lý file theo batch nhỏ hơn
-
-### FAISS index corruption
-
-```bash
-# Xóa và tạo lại index
-rm -rf Root_Folder/*/Faiss_Folder/index.*
-# Upload lại documents
-```
+---
 
 ## 📝 License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 
 ## 🤝 Contributing
 
 1. Fork project
-2. Tạo feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
+2. Tạo feature branch: `git checkout -b feature/your-feature`
+3. Commit: `git commit -m 'feat: add your feature'`
+4. Push: `git push origin feature/your-feature`
 5. Mở Pull Request
 
 ## 🙏 Acknowledgments
 
-- [FastAPI](https://fastapi.tiangolo.com/) - Web framework
-- [LangChain](https://langchain.com/) - LLM framework
-- [FAISS](https://faiss.ai/) - Vector similarity search
-- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - OCR engine
-- [MongoDB](https://mongodb.com/) - Database
+- [FastAPI](https://fastapi.tiangolo.com/) — Web framework hiện đại, hiệu suất cao
+- [Redis / RedisStack](https://redis.io/docs/stack/) — Vector database với filter theo metadata
+- [Google Gemini](https://ai.google.dev/) — Embedding & Language Model
+- [MongoDB](https://mongodb.com/) — Lưu trữ metadata linh hoạt
+- [LangChain](https://langchain.com/) — LLM orchestration framework

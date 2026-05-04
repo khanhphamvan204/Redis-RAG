@@ -40,7 +40,7 @@ class RAGMetrics(BaseModel):
 
 class QueryMetadata(BaseModel):
     """Additional query metadata"""
-    model_used: str = Field(default="gemini-2.5-flash", description="LLM model used")
+    model_used: str = Field(default="gemini-robotics-er-1.5-preview", description="LLM model used")
     history_used: bool = Field(default=False, description="Whether chat history was used")
     history_count: int = Field(default=0, description="Number of history messages used")
     query_rewritten: bool = Field(default=False, description="Whether query was rewritten")
@@ -93,7 +93,7 @@ class QueryLog(BaseModel):
                     "success": True
                 },
                 "metadata": {
-                    "model_used": "gemini-2.5-flash",
+                    "model_used": "gemini-robotics-er-1.5-preview",
                     "history_used": False,
                     "history_count": 0,
                     "query_rewritten": False
